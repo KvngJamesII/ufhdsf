@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LUCA Bot - Admin Panel</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">🔧 LUCA Admin Panel</div>
+        <div class="nav-right">
+            <span class="username">Admin</span>
+            <button onclick="logout()" class="btn btn-small">Logout</button>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Stats Overview -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon">👥</div>
+                <div class="stat-info">
+                    <h3 id="totalUsers">0</h3>
+                    <p>Total Users</p>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon">✅</div>
+                <div class="stat-info">
+                    <h3 id="activeUsers">0</h3>
+                    <p>Active Bots</p>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon">📅</div>
+                <div class="stat-info">
+                    <h3 id="todaySignups">0</h3>
+                    <p>Today's Signups</p>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-icon">🤖</div>
+                <div class="stat-info">
+                    <h3 id="runningBots">0</h3>
+                    <p>Running Bots</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Admin Controls -->
+        <div class="admin-card">
+            <h3>⚙️ System Controls</h3>
+
+            <div class="control-grid">
+                <div class="control-item">
+                    <label>Signups Status</label>
+                    <button id="toggleSignupsBtn" onclick="toggleSignups()" class="btn">
+                        <span id="signupStatusText">Loading...</span>
+                    </button>
+                </div>
+
+                <div class="control-item">
+                    <label>Max Users</label>
+                    <div class="inline-controls">
+                        <input type="number" id="maxUsersInput" min="1" max="1000" style="width: 100px;">
+                        <button onclick="setMaxUsers()" class="btn btn-secondary">Set</button>
+                    </div>
+                </div>
+
+                <div class="control-item">
+                    <label>Deploy Updates</label>
+                    <button onclick="restartAllBots()" class="btn btn-warning">
+                        🔄 Restart All Bots
+                    </button>
+                </div>
+
+                <div class="control-item">
+                    <label>Quick Actions</label>
+                    <button onclick="refreshStats()" class="btn btn-secondary">
+                        🔄 Refresh Stats
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Users List -->
+        <div class="admin-card">
+            <h3>👥 All Users</h3>
+
+            <div class="table-container">
+                <table class="users-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Phone Number</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="usersTableBody">
+                        <tr>
+                            <td colspan="5" class="loading-cell">Loading users...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Running Bots -->
+        <div class="admin-card">
+            <h3>🤖 Running Bot Processes</h3>
+
+            <div id="runningBotsList" class="bots-list">
+                <p class="loading-text">Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/admin.js"></script>
+</body>
+</html>

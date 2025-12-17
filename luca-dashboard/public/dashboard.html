@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LUCA Bot - Dashboard</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">🤍 LUCA Bot</div>
+        <div class="nav-right">
+            <span class="username" id="navUsername"></span>
+            <button onclick="logout()" class="btn btn-small">Logout</button>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- No Bot State -->
+        <div id="noBotState" class="dashboard-card">
+            <div class="welcome-section">
+                <h2>👋 Welcome to LUCA!</h2>
+                <p>Get started by connecting your WhatsApp number to create your personal bot.</p>
+            </div>
+
+            <div class="features-grid">
+                <div class="feature-item">
+                    <span class="feature-icon">🛡️</span>
+                    <h4>Group Management</h4>
+                    <p>Lock, kick, warn, promote members</p>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🎭</span>
+                    <h4>Anonymous Chat</h4>
+                    <p>Fun anonymous messaging game</p>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">💾</span>
+                    <h4>Status Saver</h4>
+                    <p>Save WhatsApp status to DM</p>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🤖</span>
+                    <h4>Custom Commands</h4>
+                    <p>Stickers, auto-responses, more</p>
+                </div>
+            </div>
+
+            <button onclick="showConnectModal()" class="btn btn-primary btn-large">
+                🚀 Create My Bot
+            </button>
+        </div>
+
+        <!-- Bot Connected State -->
+        <div id="botConnectedState" style="display: none;">
+            <div class="bot-card">
+                <div class="bot-header">
+                    <div class="bot-status">
+                        <span class="status-dot" id="statusDot"></span>
+                        <span id="statusText">Checking...</span>
+                    </div>
+                    <div class="bot-title">
+                        <h2>LUCA Bot</h2>
+                        <p class="bot-phone" id="botPhone"></p>
+                    </div>
+                </div>
+
+                <div class="bot-stats">
+                    <div class="stat-item">
+                        <span class="stat-label">Status</span>
+                        <span class="stat-value" id="botStatusValue">—</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Uptime</span>
+                        <span class="stat-value" id="botUptime">—</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Memory</span>
+                        <span class="stat-value" id="botMemory">—</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Restarts</span>
+                        <span class="stat-value" id="botRestarts">—</span>
+                    </div>
+                </div>
+
+                <div class="bot-actions">
+                    <button onclick="restartBot()" class="btn btn-secondary">🔄 Restart Bot</button>
+                    <button onclick="disconnectBot()" class="btn btn-danger">🔌 Disconnect</button>
+                </div>
+
+                <div class="info-box">
+                    <h4>📱 Using Your Bot</h4>
+                    <p>Type <code>.menu</code> in any WhatsApp chat to see all commands!</p>
+                    <p><strong>Your bot is running 24/7 on our servers.</strong></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Connect Modal -->
+    <div id="connectModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeConnectModal()">&times;</span>
+
+            <div id="connectStep1">
+                <h2>📱 Connect Your WhatsApp</h2>
+                <p>Enter your WhatsApp number to get started</p>
+
+                <div class="form-group">
+                    <label>WhatsApp Number</label>
+                    <input type="text" id="phoneInput" placeholder="1234567890" maxlength="15">
+                    <small>Country code + number (no spaces or +)</small>
+                </div>
+
+                <button onclick="generateCode()" class="btn btn-primary btn-large">
+                    Generate Pairing Code
+                </button>
+
+                <div id="connectError" class="error-message"></div>
+            </div>
+
+            <div id="connectStep2" style="display: none;">
+                <h2>✅ Your Pairing Code</h2>
+
+                <div class="pairing-code">
+                    <span id="pairingCode"></span>
+                </div>
+
+                <div class="instructions">
+                    <h4>📱 How to connect:</h4>
+                    <ol>
+                        <li>Open WhatsApp on your phone</li>
+                        <li>Go to <strong>Settings > Linked Devices</strong></li>
+                        <li>Tap <strong>"Link a Device"</strong></li>
+                        <li>Enter the code above</li>
+                    </ol>
+                    <p class="timer">⏱️ Code valid for <span id="timer">60</span> seconds</p>
+                </div>
+
+                <p class="waiting-text">⏳ Waiting for connection...</p>
+            </div>
+
+            <div id="connectStep3" style="display: none;">
+                <div class="success-animation">
+                    <div class="checkmark">✓</div>
+                </div>
+                <h2>🎉 Connected Successfully!</h2>
+                <p>Your LUCA bot is now running 24/7!</p>
+                <button onclick="location.reload()" class="btn btn-primary">Go to Dashboard</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>

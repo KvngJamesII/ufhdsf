@@ -1,0 +1,46 @@
+# Markdown files
+*.md
+
+# Node modules
+node_modules/
+*/node_modules/
+
+# Environment files
+.env
+.env.local
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+database.json
+luca.db
+
+# Auth info
+auth_info/
+*/auth_info/
+
+# User data
+users/
+bot_data.json
+
+# Logs
+*.log
+logs/
+*.output
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Vercel
+.vercel
+
+# Temporary files
+temp/
+tmp/
+*.tmp

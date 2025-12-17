@@ -1,0 +1,29 @@
+{
+  "name": "idev-group-manager-bot",
+  "version": "2.0.0",
+  "description": "iDev WhatsApp Group Manager Bot - Complete group management with sticker commands",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "group-manager",
+    "baileys",
+    "automation"
+  ],
+  "author": "iDev Team",
+  "license": "ISC",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "axios": "^1.6.2",
+    "cheerio": "^1.1.2",
+    "dotenv": "^16.3.1",
+    "form-data": "^4.0.5",
+    "pino": "^10.1.0",
+    "pino-pretty": "^13.1.2",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
