@@ -1,4 +1,4 @@
-const {
+﻿const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
@@ -30,16 +30,48 @@ const lockedGroups = new Set();
 const userWarns = {};
 const blockedUsers = {};
 let BOT_OWNER = null; // Will be auto-detected from pairing
+const sudoUsers = []; // Users who can use the bot like owner
 
 let botMode = "private";
+
+// Bot start time for uptime tracking
+const botStartTime = Date.now();
 
 // Anonymous messaging system
 const ANONYMOUS_WEB_URL = "https://lucaanonym.vercel.app"; // Deployed Vercel URL
 const anonymousSessions = new Map();
 const axios = require('axios');
 
+// RTW Game System
+const rtwGames = new Map(); // Store active games by group JID
+const WORDS_FILE = path.join(__dirname, 'words.txt');
+
+// WCG (Word Chain Game) System
+const wcgGames = new Map(); // Store active WCG games by group JID
+const wcgStats = {}; // Store WCG stats per group
+
+// 400Q Game System (DM only)
+const q400Games = new Map(); // Store active 400Q sessions by chat JID
+const QUESTIONS_FILE = path.join(__dirname, 'questions_400.txt');
+
 // Custom welcome messages per group
 const customWelcomeMessages = {};
+
+// Welcome/Goodbye enabled per group (disabled by default)
+const welcomeEnabled = {}; // { groupJid: true/false }
+const goodbyeEnabled = {}; // { groupJid: true/false }
+
+// AFK System
+const afkUsers = {}; // { jid: { reason, time } }
+
+// Anti-mention Settings (for groups)
+const antiMentionGroups = {}; // { groupJid: true/false }
+
+// Anti-Delete System
+let antiDeleteEnabled = false; // Global toggle for anti-delete
+const messageCache = new Map(); // Cache messages for anti-delete { messageId: messageData }
+const MAX_CACHE_SIZE = 1000; // Maximum messages to cache
+const CACHE_EXPIRY = 30 * 60 * 1000; // 30 minutes expiry
 
 // Data file path
 const DATA_FILE = path.join(__dirname, 'bot_data.json');
@@ -61,6 +93,14 @@ const loadData = () => {
         Object.assign(customWelcomeMessages, data.customWelcomeMessages);
       }
 
+      // Load welcome/goodbye enabled settings
+      if (data.welcomeEnabled) {
+        Object.assign(welcomeEnabled, data.welcomeEnabled);
+      }
+      if (data.goodbyeEnabled) {
+        Object.assign(goodbyeEnabled, data.goodbyeEnabled);
+      }
+
       // Load sticker commands
       if (data.stickerCommands) {
         Object.assign(stickerCommands, data.stickerCommands);
@@ -74,6 +114,32 @@ const loadData = () => {
       // Load user warns
       if (data.userWarns) {
         Object.assign(userWarns, data.userWarns);
+      }
+
+      // Load sudo users
+      if (data.sudoUsers && Array.isArray(data.sudoUsers)) {
+        sudoUsers.length = 0;
+        sudoUsers.push(...data.sudoUsers);
+      }
+
+      // Load WCG stats
+      if (data.wcgStats) {
+        Object.assign(wcgStats, data.wcgStats);
+      }
+
+      // Load AFK users
+      if (data.afkUsers) {
+        Object.assign(afkUsers, data.afkUsers);
+      }
+
+      // Load anti-mention groups
+      if (data.antiMentionGroups) {
+        Object.assign(antiMentionGroups, data.antiMentionGroups);
+      }
+
+      // Load anti-delete setting
+      if (data.antiDeleteEnabled !== undefined) {
+        antiDeleteEnabled = data.antiDeleteEnabled;
       }
 
       logger.info('Bot data loaded successfully from JSON');
@@ -91,9 +157,16 @@ const saveData = () => {
     const data = {
       botOwner: BOT_OWNER,
       customWelcomeMessages,
+      welcomeEnabled,
+      goodbyeEnabled,
       stickerCommands,
       adminSettings,
       userWarns,
+      sudoUsers,
+      wcgStats,
+      afkUsers,
+      antiMentionGroups,
+      antiDeleteEnabled,
       lastSaved: new Date().toISOString()
     };
 
@@ -110,8 +183,8 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 const isOwnerNumber = (senderJid) => {
-  if (!senderJid) {
-    logger.debug('isOwnerNumber: senderJid is null/undefined');
+  if (!senderJid || !BOT_OWNER) {
+    logger.warn({ senderJid, BOT_OWNER }, 'Owner check FAILED: Missing senderJid or BOT_OWNER');
     return false;
   }
 
@@ -119,21 +192,39 @@ const isOwnerNumber = (senderJid) => {
   let senderNumber = senderJid.split("@")[0];
   senderNumber = senderNumber.split(":")[0]; // Remove :8 or other suffixes
 
-  // Log all checks for debugging
-  logger.info({
-    senderJid,
-    senderNumber,
-    BOT_OWNER,
-    exactMatch: senderNumber === BOT_OWNER,
-    includesMatch: senderJid.includes(BOT_OWNER),
-  }, 'Owner check details');
+  // Also normalize BOT_OWNER
+  let ownerNumber = BOT_OWNER.split("@")[0];
+  ownerNumber = ownerNumber.split(":")[0];
 
   // Check if the sender number matches the owner
   // Also check if sender contains the owner number (for LID format)
-  const isOwner = senderNumber === BOT_OWNER || senderJid.includes(BOT_OWNER);
-  logger.info({ isOwner }, 'Owner check result');
+  const isOwner = senderNumber === ownerNumber || senderJid.includes(ownerNumber);
+
+  // Verbose logging disabled to reduce console spam
+  // logger.info({
+  //   senderJid,
+  //   senderNumber,
+  //   ownerNumber,
+  //   BOT_OWNER,
+  //   exactMatch: senderNumber === ownerNumber,
+  //   includesMatch: senderJid.includes(ownerNumber),
+  //   finalResult: isOwner
+  // }, 'OWNER CHECK RESULT');
 
   return isOwner;
+};
+
+const isSudoUser = (senderJid) => {
+  if (!senderJid) return false;
+  
+  let senderNumber = senderJid.split("@")[0];
+  senderNumber = senderNumber.split(":")[0];
+  
+  return sudoUsers.some(sudo => {
+    let sudoNumber = sudo.split("@")[0];
+    sudoNumber = sudoNumber.split(":")[0];
+    return senderNumber === sudoNumber || senderJid.includes(sudoNumber);
+  });
 };
 
 const normalizeJid = (jid) => {
@@ -289,16 +380,52 @@ const downloadViewOnceMedia = async (viewOnceMsg) => {
 
 const convertToSticker = async (imageBuffer) => {
   try {
-    const stickerBuffer = await sharp(imageBuffer)
+    let stickerBuffer = await sharp(imageBuffer)
       .resize(512, 512, {
         fit: 'contain',
         background: { r: 0, g: 0, b: 0, alpha: 0 }
       })
       .webp({ lossless: true })
       .toBuffer();
+    
     return stickerBuffer;
   } catch (err) {
     logger.error({ error: err.message }, 'Sticker conversion error');
+    return null;
+  }
+};
+
+const convertVideoToSticker = async (videoBuffer) => {
+  try {
+    const { execSync } = require('child_process');
+    const tempDir = path.join(__dirname, 'temp');
+    
+    // Create temp directory if it doesn't exist
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    const tempInput = path.join(tempDir, `input_${Date.now()}.mp4`);
+    const tempOutput = path.join(tempDir, `output_${Date.now()}.webp`);
+    
+    // Write video buffer to temp file
+    fs.writeFileSync(tempInput, videoBuffer);
+    
+    // Convert first 5 seconds of video to animated WebP sticker (512x512, 10fps for smaller size)
+    const ffmpegCmd = `ffmpeg -i "${tempInput}" -t 5 -vf "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,fps=10" -vcodec libwebp -lossless 0 -compression_level 6 -q:v 50 -loop 0 -preset default -an -vsync 0 "${tempOutput}" -y`;
+    
+    execSync(ffmpegCmd, { stdio: 'pipe' });
+    
+    // Read the output file
+    let stickerBuffer = fs.readFileSync(tempOutput);
+    
+    // Clean up temp files
+    fs.unlinkSync(tempInput);
+    fs.unlinkSync(tempOutput);
+    
+    return stickerBuffer;
+  } catch (err) {
+    logger.error({ error: err.message }, 'Video sticker conversion error');
     return null;
   }
 };
@@ -328,24 +455,30 @@ const generateSessionId = () => {
 
 const createAnonymousSession = async (groupJid) => {
   const sessionId = generateSessionId();
+  const createdAt = Date.now();
 
   try {
-    // Create session on web server
-    await axios.post(`${ANONYMOUS_WEB_URL}/api/session/create`, {
+    // Create session on web server and get token
+    const response = await axios.post(`${ANONYMOUS_WEB_URL}/api/session/create`, {
       sessionId,
-      groupJid
+      groupJid,
+      createdAt
     });
 
-    // Store session locally
+    const { token } = response.data;
+
+    // Store session locally with token
     anonymousSessions.set(sessionId, {
       groupJid,
       active: true,
-      createdAt: Date.now(),
-      messageCount: 0
+      createdAt,
+      lastActivity: createdAt,
+      messageCount: 0,
+      token // Store the token for the URL
     });
 
     logger.info({ sessionId, groupJid }, 'Anonymous session created');
-    return sessionId;
+    return { sessionId, token };
   } catch (error) {
     logger.error({ error: error.message }, 'Failed to create anonymous session');
     return null;
@@ -373,6 +506,28 @@ const endAnonymousSession = async (sessionId) => {
   }
 };
 
+// Check for expired anonymous sessions (20 minutes inactivity)
+const checkAnonymousSessionExpiry = async (sock) => {
+  const TWENTY_MINUTES = 20 * 60 * 1000;
+  const now = Date.now();
+
+  for (const [sessionId, session] of anonymousSessions.entries()) {
+    if (!session.active) continue;
+
+    const lastActivity = session.lastActivity || session.createdAt;
+    if (now - lastActivity > TWENTY_MINUTES) {
+      // Session expired due to inactivity
+      await endAnonymousSession(sessionId);
+      
+      await sock.sendMessage(session.groupJid, {
+        text: `*ANONYMOUS*\n\nSession expired (20 min)\nTotal messages: ${session.messageCount}`
+      });
+      
+      logger.info({ sessionId }, 'Anonymous session expired due to inactivity');
+    }
+  }
+};
+
 const pollAnonymousMessages = async (sock) => {
   for (const [sessionId, session] of anonymousSessions.entries()) {
     if (!session.active) continue;
@@ -382,16 +537,742 @@ const pollAnonymousMessages = async (sock) => {
       const { messages } = response.data;
 
       for (const msg of messages) {
+        // Better formatted anonymous message with styling
         await sock.sendMessage(session.groupJid, {
-          text: `🎭 *Anonymous #${msg.number}*\n\n${msg.message}`
+          text: `┌─────────────────┐
+  *ANON USER #${msg.number}*
+└─────────────────┘
+
+_${msg.message}_
+
+───────────`
         });
 
         session.messageCount = msg.number;
+        session.lastActivity = Date.now(); // Update last activity on message
       }
     } catch (error) {
       logger.error({ error: error.message, sessionId }, 'Failed to poll anonymous messages');
     }
   }
+};
+
+// ============================================
+// RTW (Rearrange The Words) Game System
+// ============================================
+
+// Load words from file
+const loadRTWWords = () => {
+  try {
+    if (!fs.existsSync(WORDS_FILE)) {
+      logger.error('Words file not found');
+      return null;
+    }
+    const allWords = fs.readFileSync(WORDS_FILE, 'utf8')
+      .split('\n')
+      .map(word => word.trim().toUpperCase())
+      .filter(word => word.length >= 5 && word.length <= 10 && /^[A-Z]+$/.test(word));
+    
+    logger.info({ total: allWords.length }, 'RTW words loaded');
+    return allWords;
+  } catch (error) {
+    logger.error({ error: error.message }, 'Error loading RTW words');
+    return null;
+  }
+};
+
+// Scramble a word
+const scrambleWord = (word) => {
+  const letters = word.split('');
+  // Shuffle multiple times to ensure good scramble
+  for (let k = 0; k < 3; k++) {
+    for (let i = letters.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [letters[i], letters[j]] = [letters[j], letters[i]];
+    }
+  }
+  const scrambled = letters.join('');
+  // If scrambled is same as original, try again
+  if (scrambled === word && word.length > 2) {
+    return scrambleWord(word);
+  }
+  return scrambled;
+};
+
+// Create RTW game
+const createRTWGame = (groupJid, ownerJid) => {
+  const game = {
+    groupJid,
+    ownerJid,
+    players: new Map(),
+    phase: 'JOINING',
+    currentWord: null,
+    scrambledWord: null,
+    round: 0,
+    maxRounds: 25,
+    joinTimer: null,
+    roundTimer: null,
+    roundId: 0, // Unique ID for each round to prevent stale timers
+    startTime: Date.now()
+  };
+  rtwGames.set(groupJid, game);
+  return game;
+};
+
+// Clean up RTW game timers
+const clearRTWTimers = (game) => {
+  if (game.joinTimer) {
+    clearInterval(game.joinTimer);
+    game.joinTimer = null;
+  }
+  if (game.roundTimer) {
+    clearInterval(game.roundTimer);
+    game.roundTimer = null;
+  }
+};
+
+// End RTW game
+const endRTWGame = async (sock, groupJid, reason = 'completed') => {
+  const game = rtwGames.get(groupJid);
+  if (!game) return;
+
+  clearRTWTimers(game);
+  game.phase = 'FINISHED';
+
+  const sortedPlayers = Array.from(game.players.entries())
+    .sort(([,a], [,b]) => b.score - a.score);
+
+  let text = `*RTW GAME ENDED*\n\n`;
+
+  if (sortedPlayers.length === 0) {
+    text += `No players joined\n`;
+  } else {
+    sortedPlayers.slice(0, 5).forEach(([jid, player], i) => {
+      const medal = i === 0 ? '[1st]' : i === 1 ? '[2nd]' : i === 2 ? '[3rd]' : '[4th]';
+      text += `${medal} @${jid.split('@')[0]}: ${player.score}pts\n`;
+    });
+    text += `\nWinner: @${sortedPlayers[0][0].split('@')[0]}\n`;
+  }
+
+  text += `Rounds: ${game.round}/${game.maxRounds}\n`;
+  text += `Time: ${Math.floor((Date.now() - game.startTime) / 1000)}s`;
+
+
+  await sock.sendMessage(groupJid, {
+    text,
+    mentions: sortedPlayers.map(([jid]) => jid)
+  });
+
+  rtwGames.delete(groupJid);
+  logger.info({ groupJid, reason }, 'RTW game ended');
+};
+
+// Start RTW join phase
+const startRTWJoinPhase = async (sock, groupJid) => {
+  const game = rtwGames.get(groupJid);
+  if (!game) return;
+
+  let timeLeft = 60;
+
+  await sock.sendMessage(groupJid, {
+    text: `*RTW GAME*\n\nType *Join* to play!\n${timeLeft}s left`
+  });
+
+  game.joinTimer = setInterval(async () => {
+    const currentGame = rtwGames.get(groupJid);
+    if (!currentGame || currentGame.phase !== 'JOINING') {
+      clearInterval(game.joinTimer);
+      game.joinTimer = null;
+      return;
+    }
+
+    timeLeft--;
+
+    if (timeLeft === 30 || timeLeft === 10) {
+      await sock.sendMessage(groupJid, {
+        text: `⏱️ *${timeLeft}s left to join!* (${currentGame.players.size} joined)`
+      });
+    }
+
+    if (timeLeft <= 0) {
+      clearInterval(game.joinTimer);
+      game.joinTimer = null;
+
+      if (currentGame.players.size < 1) {
+        await sock.sendMessage(groupJid, {
+          text: `❌ *RTW Cancelled*\nNo players joined!`
+        });
+        rtwGames.delete(groupJid);
+        return;
+      }
+
+      currentGame.phase = 'PLAYING';
+      
+      const playerList = Array.from(currentGame.players.keys())
+        .map(jid => `@${jid.split('@')[0]}`)
+        .join(', ');
+
+      await sock.sendMessage(groupJid, {
+        text: `*RTW Starting!*\nPlayers: ${playerList}\n25 rounds | 30s each`,
+        mentions: Array.from(currentGame.players.keys())
+      });
+
+      setTimeout(() => startRTWRound(sock, groupJid), 2000);
+    }
+  }, 1000);
+};
+
+// Start a RTW round
+const startRTWRound = async (sock, groupJid) => {
+  const game = rtwGames.get(groupJid);
+  if (!game || game.phase !== 'PLAYING') return;
+
+  game.round++;
+  game.roundId++; // New unique round ID
+  const currentRoundId = game.roundId;
+
+  if (game.round > game.maxRounds) {
+    await endRTWGame(sock, groupJid, 'completed');
+    return;
+  }
+
+  const words = loadRTWWords();
+  if (!words || words.length === 0) {
+    await sock.sendMessage(groupJid, { text: `❌ No words available!` });
+    await endRTWGame(sock, groupJid, 'error');
+    return;
+  }
+
+  // Select word based on difficulty (round number)
+  let minLen, maxLen;
+  if (game.round <= 10) {
+    minLen = 5; maxLen = 6;
+  } else if (game.round <= 18) {
+    minLen = 6; maxLen = 7;
+  } else {
+    minLen = 7; maxLen = 10;
+  }
+
+  const filteredWords = words.filter(w => w.length >= minLen && w.length <= maxLen);
+  if (filteredWords.length === 0) {
+    game.currentWord = words[Math.floor(Math.random() * words.length)];
+  } else {
+    game.currentWord = filteredWords[Math.floor(Math.random() * filteredWords.length)];
+  }
+  
+  game.scrambledWord = scrambleWord(game.currentWord);
+
+  const difficulty = game.round <= 10 ? 'Easy' : game.round <= 18 ? 'Medium' : 'Hard';
+
+  await sock.sendMessage(groupJid, {
+    text: `*Round ${game.round}/25* ${difficulty}\n\nUnscramble: *${game.scrambledWord}*\n\n${game.currentWord.length} letters | 30 seconds`
+  });
+
+  let timeLeft = 30;
+  game.roundTimer = setInterval(async () => {
+    const currentGame = rtwGames.get(groupJid);
+    
+    // Check if game still exists and this is still the same round
+    if (!currentGame || currentGame.phase !== 'PLAYING' || currentGame.roundId !== currentRoundId) {
+      clearInterval(game.roundTimer);
+      game.roundTimer = null;
+      return;
+    }
+
+    timeLeft--;
+
+    if (timeLeft === 10) {
+      await sock.sendMessage(groupJid, { text: `⏰ *10s left!*` });
+    }
+
+    if (timeLeft <= 0) {
+      clearInterval(game.roundTimer);
+      game.roundTimer = null;
+
+      // Double check we're still on this round
+      const checkGame = rtwGames.get(groupJid);
+      if (!checkGame || checkGame.roundId !== currentRoundId) return;
+
+      await sock.sendMessage(groupJid, {
+        text: `⏰ *Time's up!*\n✅ Answer: *${checkGame.currentWord}*`
+      });
+
+      if (checkGame.round % 5 === 0) {
+        await showRTWLeaderboard(sock, groupJid);
+      }
+
+      setTimeout(() => startRTWRound(sock, groupJid), 2500);
+    }
+  }, 1000);
+};
+
+// Handle RTW answer
+const handleRTWAnswer = async (sock, groupJid, playerJid, answer, messageKey) => {
+  const game = rtwGames.get(groupJid);
+  if (!game || game.phase !== 'PLAYING' || !game.currentWord) return false;
+
+  // Only players who joined can answer
+  if (!game.players.has(playerJid)) return false;
+
+  const cleanAnswer = answer.trim().toUpperCase();
+  
+  // Quick length check
+  if (cleanAnswer.length !== game.currentWord.length) return false;
+
+  // Check if correct
+  if (cleanAnswer === game.currentWord) {
+    // Stop the timer immediately
+    if (game.roundTimer) {
+      clearInterval(game.roundTimer);
+      game.roundTimer = null;
+    }
+
+    // Increment round ID to invalidate any pending timer callbacks
+    game.roundId++;
+
+    // Award point
+    const player = game.players.get(playerJid);
+    player.score++;
+
+    await sock.sendMessage(groupJid, {
+      react: { text: '✅', key: messageKey }
+    });
+
+    await sock.sendMessage(groupJid, {
+      text: `@${playerJid.split('@')[0]} got it!\n*${game.currentWord}*\nScore: ${player.score}`,
+      mentions: [playerJid]
+    });
+
+    if (game.round % 5 === 0) {
+      await showRTWLeaderboard(sock, groupJid);
+    }
+
+    setTimeout(() => startRTWRound(sock, groupJid), 2500);
+    return true;
+  }
+
+  return false;
+};
+
+// Show RTW leaderboard
+const showRTWLeaderboard = async (sock, groupJid) => {
+  const game = rtwGames.get(groupJid);
+  if (!game) return;
+
+  const sorted = Array.from(game.players.entries())
+    .sort(([,a], [,b]) => b.score - a.score);
+
+  if (sorted.length === 0) return;
+
+  let text = `*Leaderboard*\n`;
+  sorted.slice(0, 5).forEach(([jid, p], i) => {
+    const medal = i === 0 ? '[1st]' : i === 1 ? '[2nd]' : i === 2 ? '[3rd]' : `${i+1}.`;
+    text += `${medal} @${jid.split('@')[0]}: ${p.score}\n`;
+  });
+
+  await sock.sendMessage(groupJid, {
+    text,
+    mentions: sorted.slice(0, 5).map(([jid]) => jid)
+  });
+};
+
+// ============================================
+// WCG (Word Chain Game) System
+// ============================================
+
+// Validate word using Free Dictionary API
+const validateWordAPI = async (word) => {
+  try {
+    const response = await axios.get(`https://api.dictionaryapi.dev/api/v2/entries/en/${word.toLowerCase()}`, {
+      timeout: 5000
+    });
+    return response.status === 200;
+  } catch (error) {
+    return false;
+  }
+};
+
+// Create WCG game
+const createWCGGame = (groupJid, starterJid) => {
+  const game = {
+    groupJid,
+    starterJid,
+    players: [], // Array of { jid, name }
+    playerOrder: [], // JIDs in play order
+    currentPlayerIndex: 0,
+    phase: 'JOINING', // JOINING, PLAYING, FINISHED
+    round: 1,
+    usedWords: new Set(),
+    currentLetter: null,
+    requiredLength: 0,
+    turnTimer: null,
+    joinTimer: null,
+    longestWord: { word: '', player: null, length: 0 },
+    eliminatedPlayers: [],
+    createdAt: Date.now()
+  };
+  wcgGames.set(groupJid, game);
+  return game;
+};
+
+// Get random letter (excluding rare letters)
+const getRandomLetter = () => {
+  const letters = 'ABCDEFGHIJKLMNOPRSTUVW'; // Excluded Q, X, Y, Z for fairness
+  return letters.charAt(Math.floor(Math.random() * letters.length));
+};
+
+// Get required word length based on round
+const getRequiredLength = (round) => {
+  if (round >= 25) {
+    return Math.floor(Math.random() * 4) + 7; // 7-10 letters
+  } else if (round >= 13) {
+    return Math.floor(Math.random() * 3) + 6; // 6-8 letters
+  } else {
+    return Math.floor(Math.random() * 5) + 4; // 4-8 letters
+  }
+};
+
+// Get time limit based on round
+const getTimeLimit = (round) => {
+  if (round >= 25) return 25;
+  if (round >= 13) return 30;
+  return 45;
+};
+
+// Start WCG join phase
+const startWCGJoinPhase = async (sock, groupJid) => {
+  const game = wcgGames.get(groupJid);
+  if (!game) return;
+
+  let timeLeft = 60;
+
+  await sock.sendMessage(groupJid, {
+    text: `*WCG GAME*\n\nType *Join* to play!\n${timeLeft}s left`
+  });
+
+  game.joinTimer = setInterval(async () => {
+    const currentGame = wcgGames.get(groupJid);
+    if (!currentGame || currentGame.phase !== 'JOINING') {
+      clearInterval(game.joinTimer);
+      return;
+    }
+
+    timeLeft--;
+
+    if (timeLeft === 30 || timeLeft === 10) {
+      await sock.sendMessage(groupJid, {
+        text: `⏱️ *${timeLeft}s left to join!* (${currentGame.players.length} joined)`
+      });
+    }
+
+    if (timeLeft <= 0) {
+      clearInterval(game.joinTimer);
+      
+      if (currentGame.players.length < 2) {
+        await sock.sendMessage(groupJid, {
+          text: `❌ *WCG Cancelled*\nNeed at least 2 players!`
+        });
+        wcgGames.delete(groupJid);
+        return;
+      }
+
+      // Start the game
+      currentGame.phase = 'PLAYING';
+      currentGame.playerOrder = currentGame.players.map(p => p.jid);
+      
+      // Shuffle player order
+      for (let i = currentGame.playerOrder.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [currentGame.playerOrder[i], currentGame.playerOrder[j]] = [currentGame.playerOrder[j], currentGame.playerOrder[i]];
+      }
+
+      await startWCGRound(sock, groupJid);
+    }
+  }, 1000);
+};
+
+// Start a WCG round/turn
+const startWCGRound = async (sock, groupJid) => {
+  const game = wcgGames.get(groupJid);
+  if (!game || game.phase !== 'PLAYING') return;
+
+  // Check if we have a winner
+  if (game.playerOrder.length === 1) {
+    await endWCGGame(sock, groupJid, game.playerOrder[0]);
+    return;
+  }
+
+  const currentPlayerJid = game.playerOrder[game.currentPlayerIndex];
+  const nextPlayerIndex = (game.currentPlayerIndex + 1) % game.playerOrder.length;
+  const nextPlayerJid = game.playerOrder[nextPlayerIndex];
+
+  const currentPlayer = game.players.find(p => p.jid === currentPlayerJid);
+  const nextPlayer = game.players.find(p => p.jid === nextPlayerJid);
+
+  game.currentLetter = getRandomLetter();
+  game.requiredLength = getRequiredLength(game.round);
+  const timeLimit = getTimeLimit(game.round);
+
+  let difficultyTag = '';
+  if (game.round >= 25) difficultyTag = '*EXTREME*';
+  else if (game.round >= 13) difficultyTag = '⚡ *HARD*';
+
+  await sock.sendMessage(groupJid, {
+    text: `*WCG Round ${game.round}* ${difficultyTag}\n\nPlayer: @${currentPlayerJid.split('@')[0]}\nStarts with: *${game.currentLetter}*\nMin letters: *${game.requiredLength}*`,
+    mentions: [currentPlayerJid, nextPlayerJid]
+  });
+
+  // Start turn timer
+  let timeLeft = timeLimit;
+  game.turnTimer = setInterval(async () => {
+    const currentGame = wcgGames.get(groupJid);
+    if (!currentGame || currentGame.phase !== 'PLAYING') {
+      clearInterval(game.turnTimer);
+      return;
+    }
+
+    timeLeft--;
+
+    if (timeLeft === 10) {
+      await sock.sendMessage(groupJid, {
+        text: `⏰ @${currentPlayerJid.split('@')[0]} *10s left!*`,
+        mentions: [currentPlayerJid]
+      });
+    }
+
+    if (timeLeft <= 0) {
+      clearInterval(game.turnTimer);
+      game.turnTimer = null;
+      await eliminateWCGPlayer(sock, groupJid, currentPlayerJid, 'time');
+    }
+  }, 1000);
+};
+
+// Eliminate a player
+const eliminateWCGPlayer = async (sock, groupJid, playerJid, reason) => {
+  const game = wcgGames.get(groupJid);
+  if (!game) return;
+
+  const player = game.players.find(p => p.jid === playerJid);
+  game.eliminatedPlayers.push(playerJid);
+  game.playerOrder = game.playerOrder.filter(jid => jid !== playerJid);
+
+  const reasonText = reason === 'time' ? 'ran out of time!' : 'is out!';
+
+  await sock.sendMessage(groupJid, {
+    text: `@${playerJid.split('@')[0]} ${reasonText}\n*${game.playerOrder.length} players left*`,
+    mentions: [playerJid]
+  });
+
+  // Check for winner
+  if (game.playerOrder.length === 1) {
+    await endWCGGame(sock, groupJid, game.playerOrder[0]);
+    return;
+  }
+
+  // Adjust current player index if needed
+  if (game.currentPlayerIndex >= game.playerOrder.length) {
+    game.currentPlayerIndex = 0;
+  }
+
+  game.round++;
+  
+  // Small delay before next round
+  setTimeout(() => startWCGRound(sock, groupJid), 2000);
+};
+
+// Handle WCG word submission
+const handleWCGWord = async (sock, groupJid, playerJid, word, messageKey) => {
+  const game = wcgGames.get(groupJid);
+  if (!game || game.phase !== 'PLAYING') return false;
+
+  const currentPlayerJid = game.playerOrder[game.currentPlayerIndex];
+  
+  // Only current player can answer
+  if (playerJid !== currentPlayerJid) return false;
+
+  const cleanWord = word.trim().toUpperCase();
+
+  // Check if starts with correct letter
+  if (!cleanWord.startsWith(game.currentLetter)) {
+    await sock.sendMessage(groupJid, {
+      text: `❌ Doesn't start with *${game.currentLetter}*!`
+    });
+    return true;
+  }
+
+  // Check length
+  if (cleanWord.length < game.requiredLength) {
+    await sock.sendMessage(groupJid, {
+      text: `❌ Not enough letters! Need *${game.requiredLength}+*`
+    });
+    return true;
+  }
+
+  // Check if already used
+  if (game.usedWords.has(cleanWord)) {
+    await sock.sendMessage(groupJid, {
+      text: `❌ This word has been used!`
+    });
+    return true;
+  }
+
+  // Validate with API
+  const isValid = await validateWordAPI(cleanWord);
+  if (!isValid) {
+    await sock.sendMessage(groupJid, {
+      text: `❌ Not in my dictionary!`
+    });
+    return true;
+  }
+
+  // Word is correct!
+  clearInterval(game.turnTimer);
+  game.turnTimer = null;
+  game.usedWords.add(cleanWord);
+
+  // Track longest word
+  if (cleanWord.length > game.longestWord.length) {
+    game.longestWord = {
+      word: cleanWord,
+      player: playerJid,
+      length: cleanWord.length
+    };
+  }
+
+  // React with checkmark
+  await sock.sendMessage(groupJid, {
+    react: { text: '✅', key: messageKey }
+  });
+
+  // Move to next player
+  game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.playerOrder.length;
+  game.round++;
+
+  // Small delay before next round
+  setTimeout(() => startWCGRound(sock, groupJid), 1500);
+  return true;
+};
+
+// End WCG game
+const endWCGGame = async (sock, groupJid, winnerJid) => {
+  const game = wcgGames.get(groupJid);
+  if (!game) return;
+
+  game.phase = 'FINISHED';
+  
+  if (game.turnTimer) clearInterval(game.turnTimer);
+  if (game.joinTimer) clearInterval(game.joinTimer);
+
+  const winner = game.players.find(p => p.jid === winnerJid);
+
+  // Update stats
+  if (!wcgStats[groupJid]) {
+    wcgStats[groupJid] = {
+      wins: {},
+      longestWord: { word: '', player: null, length: 0 },
+      totalGames: 0
+    };
+  }
+
+  const stats = wcgStats[groupJid];
+  stats.totalGames++;
+  
+  // Update wins
+  if (!stats.wins[winnerJid]) {
+    stats.wins[winnerJid] = 0;
+  }
+  stats.wins[winnerJid]++;
+
+  // Update longest word record
+  if (game.longestWord.length > stats.longestWord.length) {
+    stats.longestWord = { ...game.longestWord };
+  }
+
+  // Find all-time winner
+  let allTimeWinner = null;
+  let maxWins = 0;
+  for (const [jid, wins] of Object.entries(stats.wins)) {
+    if (wins > maxWins) {
+      maxWins = wins;
+      allTimeWinner = jid;
+    }
+  }
+
+  const longestWordPlayer = game.longestWord.player;
+
+  await sock.sendMessage(groupJid, {
+    text: `*WCG WINNER*\n\n@${winnerJid.split('@')[0]}\n\nLongest Word: *${game.longestWord?.word || 'N/A'}* (${game.longestWord?.word?.length || 0} letters)\n\nAll-Time Champ: @${allTimeChamp.split('@')[0]} (${allTimeWins} wins)`,
+    mentions: [winnerJid, longestWordPlayer, allTimeWinner].filter(Boolean)
+  });
+
+  saveData();
+  wcgGames.delete(groupJid);
+};
+
+// Force end WCG game
+const forceEndWCGGame = async (sock, groupJid) => {
+  const game = wcgGames.get(groupJid);
+  if (!game) return false;
+
+  if (game.turnTimer) clearInterval(game.turnTimer);
+  if (game.joinTimer) clearInterval(game.joinTimer);
+
+  await sock.sendMessage(groupJid, {
+    text: `*WCG game ended by admin*`
+  });
+
+  wcgGames.delete(groupJid);
+  return true;
+};
+
+// ============================================
+// 400Q Game System (DM Only)
+// ============================================
+
+// Load questions from file
+const load400Questions = () => {
+  try {
+    if (!fs.existsSync(QUESTIONS_FILE)) {
+      logger.error('Questions file not found');
+      return [];
+    }
+    const questions = fs.readFileSync(QUESTIONS_FILE, 'utf8')
+      .split('\n')
+      .map(q => q.trim())
+      .filter(q => q.length > 0);
+    
+    logger.info({ count: questions.length }, '400Q questions loaded');
+    return questions;
+  } catch (error) {
+    logger.error({ error: error.message }, 'Error loading 400Q questions');
+    return [];
+  }
+};
+
+// Create 400Q session
+const create400QGame = (chatJid) => {
+  const game = {
+    chatJid,
+    currentPlayer: 1,
+    waitingForNumber: true,
+    lastBotMessageId: null,
+    createdAt: Date.now()
+  };
+  q400Games.set(chatJid, game);
+  return game;
+};
+
+// Get random question
+const getRandom400Question = () => {
+  const questions = load400Questions();
+  if (questions.length === 0) return null;
+  return questions[Math.floor(Math.random() * questions.length)];
+};
+
+// End 400Q game
+const end400QGame = (chatJid) => {
+  q400Games.delete(chatJid);
 };
 
 // VCF contact export helper function
@@ -449,81 +1330,101 @@ const downloadStatusMedia = async (statusMessage) => {
   }
 };
 
+// Format uptime
+const formatUptime = () => {
+  const ms = Date.now() - botStartTime;
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  
+  if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
+};
+
 const getMenu = () => `
-╔══════════════════════════╗
-║      🤍 *LUCA BOT* 🤍      ║
-║  Built by TheIdleDeveloper  ║
-╚══════════════════════════╝
+ 🤍 *L-U-C-A* 🤍
+ _Built By TheIdleDeveloper_
 
-┏━━━ *GROUP MANAGEMENT* ━━━┓
+┌─────────────────────
+│ ◌ Owner: ${BOT_OWNER || 'Unknown'}
+│ ◌ Uptime: ${formatUptime()}
+│ ◌ Mode: ${botMode.toUpperCase()}
+│ ◌ Version: 1.0.0
+└─────────────────────
+ 
+  ━━━ *GROUP* ━━━
+  ◻ *.lock* - Lock (.mute/.close)
+  ◻ *.open* - Unlock (.unmute)  
+  ◻ *.kick* - Kick user
+  ◻ *.warn* - Warn user (3=kick)
+  ◻ *.unwarn* - Remove warning
+  ◻ *.promote* - Make admin
+  ◻ *.demote* - Remove admin
+  ◻ *.block* - Block user
+  ◻ *.unblock* - Unblock user
+  ◻ *.left* - Leave group
+  ◻ *.acceptall* - Approve joins
+  ◻ *.rejectall* - Reject joins
 
-🔒 *.lock* - Lock group
-🔓 *.open* - Unlock group
-👢 *.kick* - Kick user (reply)
-⚠️ *.warn* - Warn user (2 = auto kick)
-⬆️ *.promote* - Make admin (reply)
-⬇️ *.demote* - Remove admin (reply)
-🚫 *.block* - Block user (reply)
-✅ *.unblock* - Unblock user (number)
+ ━━━ *CHAT* ━━━
+ ◯ *.antilink* on/off
+ ◯ *.tagall* - Tag all (.t/.tag)
+ ◯ *.hidetag* - Invisible tag
+ ◯ *.welcome* on/off
+ ◯ *.goodbye* on/off
+ ◯ *.setwelcome* [msg]
+ ◯ *.resetwelcome*
 
-┗━━━━━━━━━━━━━━━━━━━━━┛
+ ━━━ *GAMES* ━━━
+ ⨷ *.anonymous* - Anon chat
+ ⨷ *.rtw* - Rearrange words
+ ⨷ *.wcg* - Word chain game
+ ⨷ *.wcgstat* - WCG stats
+ ⨷ *.400q* - 400 Questions (DM)
+ ⨷ *.end* - End any game
 
-┏━━━ *CHAT MANAGEMENT* ━━━┓
+━━━ *STICKERS* ━━━
+⪾ *.sticker* - Image/video
+⪾ *.setsticker* [cmd]
+   _save, vv, kick, lock_
 
-🔗 *.antilink* on/off - Link filter
-📢 *.tagall* - Tag all members
-👻 *.hidetag* - Tag all (invisible)
-🎭 *.anonymous* - Anonymous chat game
-🛑 *.end* - End anonymous session
-👋 *.setwelcome* [msg] - Custom welcome
-   Use {user} to mention new members
-   Example: .setwelcome Hey {user}! 👋
-🔄 *.resetwelcome* - Default welcome
+━━━ *UTILITIES* ━━━
+◌ *.vv* - Save view-once
+◌ *.save* - Status to DM
+◌ *.getpp* - Profile pic
+◌ *.play* - Download music
+◌ *.ping* - Bot status
+◌ *.delete* - Delete msg
+◌ *.vcf* - Export contacts
+◌ *.tr* [lang] - Translate
+◌ *.afk* [reason] - Set AFK
+◌ *.back* - Return from AFK
 
-┗━━━━━━━━━━━━━━━━━━━━━┛
+━━━ *DOWNLOADERS* ━━━
+◯ *.tt* [url] - TikTok video
+◯ *.fb* [url] - Facebook video
 
-┏━━━ *STICKERS* ━━━┓
+━━━ *CRYPTO* ━━━
+⨷ *.live* [coin]
+   _btc, eth, sol, ton..._
 
-🖼️ *.sticker* - Image to sticker (reply)
-🎪 *.setsticker* [cmd] - Sticker shortcuts
-   Reply to sticker + command name
-   Commands: save, vv, kick, lock, etc.
-   Example: Reply to sticker, type
-   ".setsticker save" - now use that
-   sticker to save status instantly!
+━━━ *SETTINGS* ━━━
+◻ *.public* - All users
+◻ *.private* - Owner only
+◻ *.antidel* on/off - Anti-delete
+◻ *.sudo* - Add sudo user
+◻ *.delsudo* - Remove sudo
+◻ *.listsudo* - List sudos
+◻ *.menu* - This menu
+◻ *.help* - Bot info
+◻ *.join* [link] - Join grp
 
-┗━━━━━━━━━━━━━━━━━━━━━┛
+_Use responsibly!_
 
-┏━━━ *UTILITIES* ━━━┓
-
-👁️ *.vv* - Save view-once (reply)
-💾 *.save* - Save status to DM (reply)
-👤 *.get pp* - Get profile pic (reply)
-📊 *.ping* - Check bot status
-🗑️ *.delete* - Delete message (reply)
-📇 *.vcf* - Export contacts (owner)
-
-┗━━━━━━━━━━━━━━━━━━━━━┛
-
-┏━━━ *CRYPTO* ━━━┓
-
-💹 *.live* [coin] - Live crypto prices
-   Example: .live btc, .live eth
-
-┗━━━━━━━━━━━━━━━━━━━━━┛
-
-┏━━━ *BOT SETTINGS* (Owner) ━━━┓
-
-🔓 *.public* - Everyone can use bot
-🔐 *.private* - Owner only mode
-📋 *.menu* - Show this menu
-ℹ️ *.help* - Bot information
-🔗 *.join* [link] - Join group (owner)
-
-┗━━━━━━━━━━━━━━━━━━━━━┛
-
-📍 *Current Mode:* ${botMode.toUpperCase()}
-⚡ *Use commands responsibly!*
+> Dev: https://t.me/theidledeveloper
 `;
 
 async function startBot() {
@@ -551,9 +1452,7 @@ async function startBot() {
 
     if (qr) {
       console.clear();
-      console.log("╔════════════════════════════════╗");
-      console.log("║   📱 Enter Phone Number 📱    ║");
-      console.log("╚════════════════════════════════╝\n");
+      console.log("   📱 Enter Phone Number 📱    ");
 
       const phoneNumber = await askQuestion(
         "Enter your phone number (with country code, e.g., 1234567890): "
@@ -566,7 +1465,7 @@ async function startBot() {
         }
 
         const code = await sock.requestPairingCode(phoneNumber);
-        console.log(`\n✅ Your pairing code: ${code}\n📌 Enter this in WhatsApp to connect`);
+        console.log(`\nYour pairing code: ${code}\nEnter this in WhatsApp to connect`);
       } catch (err) {
         logger.error({ error: err.message }, 'Pairing code error');
       }
@@ -587,34 +1486,66 @@ async function startBot() {
 
       const ownerJid = normalizeJid(BOT_OWNER);
       await sock.sendMessage(ownerJid, {
-        text: "LUCA 1.0 Is Now Connected And Running✅🤍\nUse .menu to see the mainmenu",
+        text: `╭━━━━━━━━━━━━━━━━━╮
+┃  🤖 *LUCA BOT v1.0* 🤖
+╰━━━━━━━━━━━━━━━━━╯
+
+✅ *Status:* Connected Successfully!
+⚡ *Mode:* ${botMode.toUpperCase()}
+👤 *Owner:* +${BOT_OWNER}
+⏰ *Time:* ${new Date().toLocaleString()}
+
+━━━━━━━━━━━━━━━━━━━
+📌 Type *.menu* to see all available commands
+━━━━━━━━━━━━━━━━━━━
+
+_Powered by The Idle Developer_ 🚀`,
       });
-      console.log("╔════════════════════════════════╗");
-      console.log("║   ✅ Connected Successfully!   ║");
-      console.log("╚════════════════════════════════╝\n");
-      console.log(`👤 Bot Owner: +${BOT_OWNER}\n`);
-      logger.info({ owner: BOT_OWNER }, 'Bot connected and running');
+      console.log("   Connected Successfully!   ");
+      console.log(`\nBot Owner: +${BOT_OWNER}`);
+      console.log(`My JID: ${sock.user.id}`);
+      console.log(`Working Dir: ${process.cwd()}`);
+      console.log(`Bot Mode: ${botMode.toUpperCase()}\n`);
+      logger.info({ owner: BOT_OWNER, userJid: sock.user.id }, 'Bot connected and running');
 
       const myJid = sock.user.id;
-      await sock.sendMessage(myJid, {
-        text: `✅ *CONNECTION SUCCESSFUL*
+      try {
+        const successImagePath = path.join(__dirname, 'images/success.jpg');
+        const successImage = fs.readFileSync(successImagePath);
+        await sock.sendMessage(myJid, {
+          image: successImage,
+          caption: `CONNECTION SUCCESSFUL
 
-🤖 KAIDO Bot is online!
-Built by: Everybody Hates James
+L-U-C-A Bot is online!
+Built by: TheIdleDeveloper
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📋 *Quick Start:*
+Quick Start:
 .menu - View all commands
 .help - Bot information
 .ping - Check status
 .public/.private - Toggle mode
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+Current Mode: ${botMode.toUpperCase()}
+Ready to manage!`,
+        });
+      } catch (err) {
+        logger.debug({ error: err.message }, 'Success image not found, sending text only');
+        await sock.sendMessage(myJid, {
+          text: `CONNECTION SUCCESSFUL
+
+L-U-C-A Bot is online!
+Built by: TheIdleDeveloper
+
+Quick Start:
+.menu - View all commands
+.help - Bot information
+.ping - Check status
+.public/.private - Toggle mode
 
 Current Mode: ${botMode.toUpperCase()}
-Ready to manage! 🚀`,
-      });
+Ready to manage!`,
+        });
+      }
 
       // Start polling for anonymous messages every 3 seconds
       setInterval(() => {
@@ -622,6 +1553,13 @@ Ready to manage! 🚀`,
           logger.error({ error: err.message }, 'Anonymous polling error');
         });
       }, 3000);
+
+      // Check for expired anonymous sessions every 60 seconds
+      setInterval(() => {
+        checkAnonymousSessionExpiry(sock).catch(err => {
+          logger.error({ error: err.message }, 'Anonymous session expiry check error');
+        });
+      }, 60000);
     }
 
     if (connection === "close") {
@@ -640,24 +1578,53 @@ Ready to manage! 🚀`,
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("group-participants.update", async (update) => {
-    logger.info({ update }, 'Group participants update received');
     const { id, participants, action } = update;
     const groupJid = id;
 
     if (action === 'add') {
+      // Check if welcome is enabled for this group (disabled by default)
+      if (!welcomeEnabled[groupJid]) {
+        return;
+      }
+
       for (const participant of participants) {
+        // Ensure participant is a string (sometimes it's an object)
+        const participantJid = typeof participant === 'string' ? participant : participant?.id || participant?.jid || String(participant);
+        if (!participantJid || typeof participantJid !== 'string') {
+          logger.warn({ participant }, 'Invalid participant format in welcome');
+          continue;
+        }
+        
         // Check if there's a custom welcome message for this group
         let welcomeMessage;
+        const username = participantJid.split('@')[0];
 
         if (customWelcomeMessages[groupJid]) {
-          // Use custom welcome message and replace {user} with mention
-          const username = participant.split('@')[0];
-          welcomeMessage = customWelcomeMessages[groupJid].replace(/{user}/g, `@${username}`);
+          // Use custom welcome message with placeholder replacements
+          try {
+            // Get group metadata for placeholders
+            const groupMeta = await sock.groupMetadata(groupJid);
+            const groupName = groupMeta.subject || 'Group';
+            const groupDesc = groupMeta.desc || 'No description';
+            const memberCount = groupMeta.participants?.length || 0;
+
+            // Replace all placeholders
+            welcomeMessage = customWelcomeMessages[groupJid]
+              .replace(/{user}/g, `@${username}`)
+              .replace(/{username}/g, username)
+              .replace(/{groupname}/g, groupName)
+              .replace(/{desc}/g, groupDesc)
+              .replace(/{membercount}/g, memberCount.toString());
+          } catch (error) {
+            // Fallback if metadata fails
+            welcomeMessage = customWelcomeMessages[groupJid].replace(/{user}/g, `@${username}`);
+            logger.error({ error: error.message }, 'Error getting group metadata for welcome');
+          }
         } else {
           // Default welcome message
           welcomeMessage = `👋 *Welcome to the Group!*
 
-Hello @${participant.split('@')[0]}, we're glad to have you here!
+Hello @${username}, we're glad to have you here!
 
 *LUCA🤍* is here to help. Type *.menu* to see all available commands.
 
@@ -666,21 +1633,183 @@ Please read the group rules and enjoy your stay!`;
 
         await sock.sendMessage(groupJid, {
           text: welcomeMessage,
-          mentions: [participant]
+          mentions: [participantJid]
         });
       }
     } else if (action === 'remove') {
+      // Check if goodbye is enabled for this group (disabled by default)
+      if (!goodbyeEnabled[groupJid]) {
+        return;
+      }
+
       for (const participant of participants) {
+        // Ensure participant is a string
+        const participantJid = typeof participant === 'string' ? participant : participant?.id || participant?.jid || String(participant);
+        if (!participantJid || typeof participantJid !== 'string') continue;
+        
         const goodbyeMessage = `👋 *Goodbye!*
         
-@${participant.split('@')[0]} has left the group.
+@${participantJid.split('@')[0]} has left the group.
         
 We hope to see you again soon!`;
 
         await sock.sendMessage(groupJid, {
           text: goodbyeMessage,
-          mentions: [participant]
+          mentions: [participantJid]
         });
+      }
+    }
+  });
+
+  // ============================================
+  // Anti-Delete: Detect deleted messages
+  // ============================================
+  sock.ev.on("messages.update", async (updates) => {
+    if (!antiDeleteEnabled) return;
+    
+    for (const update of updates) {
+      // Check if message was deleted (revoked)
+      if (update.update?.messageStubType === 1 || update.update?.message === null) {
+        const messageId = update.key?.id;
+        const cachedMsg = messageCache.get(messageId);
+        
+        if (cachedMsg && BOT_OWNER) {
+          try {
+            const ownerJid = BOT_OWNER.includes('@') ? BOT_OWNER : BOT_OWNER + '@s.whatsapp.net';
+            const senderNumber = cachedMsg.sender.split('@')[0];
+            
+            // Get group name if it's a group message
+            let location = 'DM';
+            if (cachedMsg.isGroup) {
+              try {
+                const groupMeta = await sock.groupMetadata(cachedMsg.remoteJid);
+                location = groupMeta.subject || 'Unknown Group';
+              } catch (err) {
+                location = 'Group';
+              }
+            }
+            
+            // Build the anti-delete message
+            let antiDelMsg = `┌─────────────┐\n   *ANTI-DEL*\n└─────────────┘\n\n`;
+            antiDelMsg += `👤 *User:* ${senderNumber}\n`;
+            antiDelMsg += `📍 *From:* ${location}\n`;
+            antiDelMsg += `⏰ *Time:* ${new Date(cachedMsg.timestamp).toLocaleString()}\n\n`;
+            
+            // Check message type and send accordingly
+            const msg = cachedMsg.message;
+            
+            if (msg.imageMessage) {
+              // Deleted image
+              const stream = await downloadContentFromMessage(msg.imageMessage, 'image');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              
+              await sock.sendMessage(ownerJid, {
+                image: buffer,
+                caption: antiDelMsg + `📷 *Type:* Image\n${msg.imageMessage.caption ? `\n💬 *Caption:* ${msg.imageMessage.caption}` : ''}`
+              });
+            } else if (msg.videoMessage) {
+              // Deleted video
+              const stream = await downloadContentFromMessage(msg.videoMessage, 'video');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              
+              await sock.sendMessage(ownerJid, {
+                video: buffer,
+                caption: antiDelMsg + `🎥 *Type:* Video\n${msg.videoMessage.caption ? `\n💬 *Caption:* ${msg.videoMessage.caption}` : ''}`
+              });
+            } else if (msg.audioMessage) {
+              // Deleted audio
+              const stream = await downloadContentFromMessage(msg.audioMessage, 'audio');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              
+              await sock.sendMessage(ownerJid, {
+                text: antiDelMsg + `🎵 *Type:* Audio/Voice Note`
+              });
+              await sock.sendMessage(ownerJid, {
+                audio: buffer,
+                mimetype: msg.audioMessage.mimetype || 'audio/mp4',
+                ptt: msg.audioMessage.ptt || false
+              });
+            } else if (msg.stickerMessage) {
+              // Deleted sticker
+              const stream = await downloadContentFromMessage(msg.stickerMessage, 'sticker');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              
+              await sock.sendMessage(ownerJid, {
+                text: antiDelMsg + `🎨 *Type:* Sticker`
+              });
+              await sock.sendMessage(ownerJid, {
+                sticker: buffer
+              });
+            } else if (msg.documentMessage) {
+              // Deleted document
+              const stream = await downloadContentFromMessage(msg.documentMessage, 'document');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              
+              await sock.sendMessage(ownerJid, {
+                document: buffer,
+                fileName: msg.documentMessage.fileName || 'document',
+                mimetype: msg.documentMessage.mimetype,
+                caption: antiDelMsg + `📄 *Type:* Document`
+              });
+            } else if (msg.viewOnceMessage || msg.viewOnceMessageV2) {
+              // Deleted view-once message
+              const viewOnce = msg.viewOnceMessage?.message || msg.viewOnceMessageV2?.message;
+              
+              if (viewOnce?.imageMessage) {
+                const stream = await downloadContentFromMessage(viewOnce.imageMessage, 'image');
+                let buffer = Buffer.from([]);
+                for await (const chunk of stream) {
+                  buffer = Buffer.concat([buffer, chunk]);
+                }
+                
+                await sock.sendMessage(ownerJid, {
+                  image: buffer,
+                  caption: antiDelMsg + `👁️ *Type:* View-Once Image\n${viewOnce.imageMessage.caption ? `\n💬 *Caption:* ${viewOnce.imageMessage.caption}` : ''}`
+                });
+              } else if (viewOnce?.videoMessage) {
+                const stream = await downloadContentFromMessage(viewOnce.videoMessage, 'video');
+                let buffer = Buffer.from([]);
+                for await (const chunk of stream) {
+                  buffer = Buffer.concat([buffer, chunk]);
+                }
+                
+                await sock.sendMessage(ownerJid, {
+                  video: buffer,
+                  caption: antiDelMsg + `👁️ *Type:* View-Once Video\n${viewOnce.videoMessage.caption ? `\n💬 *Caption:* ${viewOnce.videoMessage.caption}` : ''}`
+                });
+              }
+            } else if (cachedMsg.text) {
+              // Deleted text message
+              antiDelMsg += `💬 *Message:*\n${cachedMsg.text}`;
+              await sock.sendMessage(ownerJid, { text: antiDelMsg });
+            } else {
+              // Unknown type
+              antiDelMsg += `❓ *Type:* Unknown message type`;
+              await sock.sendMessage(ownerJid, { text: antiDelMsg });
+            }
+            
+            // Remove from cache after processing
+            messageCache.delete(messageId);
+            
+          } catch (err) {
+            logger.error({ error: err.message }, 'Anti-delete error');
+          }
+        }
       }
     }
   });
@@ -702,19 +1831,74 @@ We hope to see you again soon!`;
       else if (message.message.extendedTextMessage)
         text = message.message.extendedTextMessage.text;
 
-      // Debug logging for message context
-      logger.info({
-        isGroup,
-        isDM,
-        sender,
-        remoteJid: message.key.remoteJid,
-        fromMe: message.key.fromMe,
-        myJid,
-        BOT_OWNER,
-      }, 'Message context');
+      // ============================================
+      // Anti-Delete: Cache messages for recovery
+      // ============================================
+      if (antiDeleteEnabled && !message.key.fromMe) {
+        const messageId = message.key.id;
+        const cacheData = {
+          id: messageId,
+          sender: sender,
+          remoteJid: message.key.remoteJid,
+          text: text,
+          timestamp: Date.now(),
+          message: message.message, // Store full message for media
+          isGroup: isGroup
+        };
+        
+        // Store in cache
+        messageCache.set(messageId, cacheData);
+        
+        // Clean old messages from cache (keep last MAX_CACHE_SIZE)
+        if (messageCache.size > MAX_CACHE_SIZE) {
+          const oldestKey = messageCache.keys().next().value;
+          messageCache.delete(oldestKey);
+        }
+      }
+
+      // Ignore bot's own "." messages (used for hidetag)
+      if (message.key.fromMe && text === ".") {
+        return;
+      }
+
+      // ============================================
+      // AFK System - Check & Handle
+      // ============================================
+      
+      // Check if sender is AFK and remove them (they're back)
+      if (afkUsers[sender]) {
+        const afkData = afkUsers[sender];
+        const duration = Math.floor((Date.now() - afkData.time) / 60000); // minutes
+        delete afkUsers[sender];
+        saveData();
+        
+        await sock.sendMessage(message.key.remoteJid, {
+          text: `🔙 *Welcome back!*\n\nYou were AFK for ${duration} minute${duration !== 1 ? 's' : ''}.`,
+          mentions: [sender]
+        });
+      }
+      
+      // Check if message mentions any AFK users
+      const mentionedJids = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+      for (const mentionedJid of mentionedJids) {
+        if (afkUsers[mentionedJid]) {
+          const afkData = afkUsers[mentionedJid];
+          const duration = Math.floor((Date.now() - afkData.time) / 60000);
+          const reason = afkData.reason || 'No reason given';
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `😴 *@${mentionedJid.split('@')[0]} is AFK*\n\n📝 Reason: ${reason}\n⏱️ Since: ${duration} minute${duration !== 1 ? 's' : ''} ago`,
+            mentions: [mentionedJid]
+          });
+        }
+      }
+
+      // Only log commands, not every message (reduces spam)
+      // Debug logs removed to reduce VM log spam
 
       // Determine if this is the owner
       let isOwner = false;
+      let isSudo = false;
 
       if (isDM) {
         // In self-DM (fromMe: true), the sender is a LID, but it's still the owner
@@ -725,22 +1909,157 @@ We hope to see you again soon!`;
 
         if (isSelfDM) {
           isOwner = true;
-          logger.info('Detected as owner (self-DM or owner number match)');
         } else {
           isOwner = isOwnerNumber(sender);
+          isSudo = isSudoUser(sender);
         }
       } else {
-        // In groups, use standard owner check
-        isOwner = isOwnerNumber(sender);
+        // In groups, check if message is fromMe first (handles LID)
+        // If fromMe is true, it's the bot owner sending the message
+        if (message.key.fromMe) {
+          isOwner = true;
+          // Verbose logging disabled
+          // logger.info({ sender, fromMe: true }, 'GROUP: Detected as owner (fromMe=true)');
+        } else {
+          // For other users, use standard owner check
+          isOwner = isOwnerNumber(sender);
+          isSudo = isSudoUser(sender);
+          // Verbose logging disabled
+          // logger.info({ sender, BOT_OWNER, isOwner, isSudo }, 'GROUP: Owner/Sudo check completed');
+        }
       }
-
-      logger.info({ isOwner, isDM, isGroup }, 'Final owner determination');
+      
+      // Sudo users can use bot like owner (except sudo management commands)
+      const canUseAsOwner = isOwner || isSudo;
 
       const fullCommand = text?.toLowerCase().trim().split(" ")[0];
-      const command = fullCommand?.startsWith(".") ? fullCommand.slice(1) : fullCommand;
-      const args = text?.trim().split(" ").slice(1);
+      
+      // Check if this is a sticker message (needs to bypass command check)
+      const hasStickerMessage = !!message.message?.stickerMessage;
+      
+      if (!fullCommand || !fullCommand.startsWith(".")) {
+        // Not a command, but check for game interactions OR sticker messages
+        if (hasStickerMessage) {
+          // Sticker message - DON'T return, continue to sticker detection below
+          // Verbose logging disabled
+          // logger.info({ hasStickerMessage, sender, isGroup, isDM }, 'STICKER: Non-command sticker detected, continuing to sticker detection');
+          // Fall through to the code below - don't return
+        } else if (isGroup && (rtwGames.has(message.key.remoteJid) || wcgGames.has(message.key.remoteJid))) {
+          // Group game logic will handle this below
+        } else if (isDM && q400Games.has(message.key.remoteJid)) {
+          // 400Q game logic - handle number replies and "next" command
+          const game = q400Games.get(message.key.remoteJid);
+          const textLower = text?.toLowerCase().trim();
+          
+          // Handle "next" command to switch players
+          if (textLower === 'next') {
+            game.currentPlayer = game.currentPlayer === 1 ? 2 : 1;
+            game.waitingForNumber = true;
+            
+            const sentMsg = await sock.sendMessage(message.key.remoteJid, {
+              text: `Player ${game.currentPlayer}: Pick a number from 1-400`
+            });
+            game.lastBotMessageId = sentMsg.key.id;
+            return;
+          }
+          
+          // Handle number reply (must be replying to bot's message)
+          const quotedId = message.message?.extendedTextMessage?.contextInfo?.stanzaId;
+          if (game.waitingForNumber && quotedId === game.lastBotMessageId) {
+            const num = parseInt(text.trim());
+            if (!isNaN(num) && num >= 1 && num <= 400) {
+              const question = getRandom400Question();
+              if (question) {
+                game.waitingForNumber = false;
+                await sock.sendMessage(message.key.remoteJid, {
+                  text: `Question:\n\n${question}`
+                });
+              } else {
+                await sock.sendMessage(message.key.remoteJid, {
+                  text: `❌ Could not load questions!`
+                });
+              }
+            }
+          }
+          return;
+        } else {
+          return;
+        }
+      }
+
+      const command = fullCommand?.startsWith(".") ? fullCommand.slice(1) : (fullCommand || "");
+      const args = text?.trim().split(" ").slice(1) || [];
+
+      // Ignore single dot or empty command - BUT allow sticker messages through
+      if ((command === "" || command === ".") && !hasStickerMessage) return;
+
+      // Handle WCG game messages (Join and word submissions)
+      if (isGroup && wcgGames.has(message.key.remoteJid)) {
+        const game = wcgGames.get(message.key.remoteJid);
+        const textLower = text?.toLowerCase().trim();
+        
+        // Handle Join phase
+        if (game.phase === 'JOINING' && textLower === 'join') {
+          const alreadyJoined = game.players.some(p => p.jid === sender);
+          if (!alreadyJoined) {
+            game.players.push({
+              jid: sender,
+              name: sender.split('@')[0]
+            });
+            
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ @${sender.split('@')[0]} joined! (${game.players.length} players)`,
+              mentions: [sender]
+            });
+          }
+          return;
+        }
+        
+        // Handle playing phase - word submissions
+        if (game.phase === 'PLAYING') {
+          const handled = await handleWCGWord(sock, message.key.remoteJid, sender, text, message.key);
+          if (handled) return;
+        }
+      }
+
+      // Handle RTW game messages (Join and answers)
+      if (isGroup && rtwGames.has(message.key.remoteJid)) {
+        const game = rtwGames.get(message.key.remoteJid);
+        const textLower = text?.toLowerCase().trim();
+        
+        // Handle Join phase
+        if (game.phase === 'JOINING' && textLower === 'join') {
+          if (!game.players.has(sender)) {
+            game.players.set(sender, {
+              name: sender.split('@')[0],
+              score: 0
+            });
+            
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ @${sender.split('@')[0]} joined! (${game.players.size} players)`,
+              mentions: [sender]
+            });
+          }
+          return;
+        }
+        
+        // Handle playing phase - answers
+        if (game.phase === 'PLAYING' && game.currentWord) {
+          const handled = await handleRTWAnswer(sock, message.key.remoteJid, sender, text, message.key);
+          if (handled) return;
+        }
+      }
 
       if (text && text.startsWith(".")) {
+        console.log('\n' + '='.repeat(60));
+        console.log(`Command: ${command}`);
+        console.log(`Sender: ${sender}`);
+        console.log(`Is Owner: ${isOwner ? 'YES' : 'NO'}`);
+        console.log(`Location: ${isGroup ? 'GROUP' : 'DM'}`);
+        console.log(`Bot Mode: ${botMode.toUpperCase()}`);
+        console.log(`Bot Owner: ${BOT_OWNER}`);
+        console.log('='.repeat(60) + '\n');
+
         logger.info({
           command,
           sender,
@@ -748,6 +2067,7 @@ We hope to see you again soon!`;
           isDM,
           isGroup,
           botMode,
+          BOT_OWNER,
           remoteJid: message.key.remoteJid,
           fromMe: message.key.fromMe,
         }, 'Command detected');
@@ -759,16 +2079,48 @@ We hope to see you again soon!`;
           (p) =>
             p.id === sender &&
             (p.admin === "admin" || p.admin === "superadmin")
-        );
+        ) || isOwner;
 
-        const botIsAdmin = groupMetadata.participants.some(
+        // Check if user is actual group admin (without owner override)
+        const isGroupAdmin = groupMetadata.participants.some(
           (p) =>
-            normalizeJid(p.id) === normalizeJid(myJid) &&
+            p.id === sender &&
             (p.admin === "admin" || p.admin === "superadmin")
         );
 
+        // Check if owner is admin in the group
+        // Since the message is fromMe=true and isOwner=true, we just need to check if the sender is admin
+        const ownerIsAdmin = groupMetadata.participants.some(
+          (p) => {
+            const isAdmin = p.admin === "admin" || p.admin === "superadmin";
+            
+            // Check if this participant matches the sender (you)
+            // The sender is your actual participant ID in this group context
+            const isSender = p.id === sender || normalizeJid(p.id) === normalizeJid(sender);
+            
+            // Verbose logging disabled to reduce console spam
+            // logger.info({
+            //   participantId: p.id,
+            //   sender,
+            //   myJid,
+            //   isAdmin,
+            //   isSender,
+            //   botOwner: BOT_OWNER
+            // }, 'Admin check details');
+            
+            return isSender && isAdmin;
+          }
+        );
+
+        // Verbose logging disabled
+        // logger.info({
+        //   ownerJid: normalizeJid(BOT_OWNER + "@s.whatsapp.net"),
+        //   ownerIsAdmin,
+        //   participantsCount: groupMetadata.participants.length
+        // }, 'OWNER ADMIN CHECK');
+
         const settings = adminSettings[message.key.remoteJid];
-        if (settings?.antilink && !isAdmin && !isOwner && !message.key.fromMe) {
+        if (settings?.antilink && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
           if (isLinkMessage(text)) {
             logger.info({ sender, group: message.key.remoteJid }, 'Link detected - taking action');
 
@@ -793,48 +2145,70 @@ We hope to see you again soon!`;
 
             const userNumber = sender.split("@")[0];
 
-            // Check if user has 2 warnings
-            if (warnCount >= 2) {
+            // Check if user has 3 warnings
+            if (warnCount >= 3) {
               // Try to kick user
               try {
                 await sock.groupParticipantsUpdate(groupId, [sender], "remove");
                 await sock.sendMessage(groupId, {
-                  text: `🚫 *@${userNumber}* sent a link!\n\n⚠️ Received 2 warnings and has been removed from the group.`,
+                  text: `@${userNumber} removed (3 link warnings).`,
                   mentions: [sender]
                 });
                 delete userWarns[groupId][sender];
                 saveData(); // Save after removing warn count
-                logger.info({ sender }, 'User kicked for sending link (2 warnings)');
+                logger.info({ sender }, 'User kicked for sending link (3 warnings)');
               } catch (err) {
                 logger.error({ error: err.message }, 'Failed to kick user');
                 await sock.sendMessage(groupId, {
-                  text: `🚫 *@${userNumber}* sent a link and has 2 warnings!\n\n❌ Could not remove: Make sure bot is admin.`,
+                  text: `@${userNumber} has 3 warnings. Could not remove - bot needs admin.`,
                   mentions: [sender]
                 });
               }
             } else {
-              // First warning
+              // Warning
               await sock.sendMessage(groupId, {
-                text: `🚫 *Link Detected!*\n\n⚠️ *Warning ${warnCount}/2* - @${userNumber}\n\n❌ Message deleted. Links are not allowed!\n⛔ One more warning = REMOVAL!`,
+                text: `⚠️ Warning ${warnCount}/3 @${userNumber} - No links allowed.`,
                 mentions: [sender]
               });
             }
             return;
-          }
+  }
+  }
+
+        const canUseBot = canUseAsOwner || (botMode === "public");
+
+        // Silent return for non-authorized users in private mode
+        // Allow ONLY owner/sudo to use commands when in private mode
+        if (!canUseBot && text && text.startsWith(".")) {
+          logger.debug({ command, sender, botMode }, 'Non-owner attempted command in private mode - ignoring');
+          return;
         }
 
-        const canUseBot = isOwner || (botMode === "public");
-
         if (command === "menu") {
+          const channelInfo = {
+            contextInfo: {
+              forwardingScore: 999,
+              isForwarded: true,
+              forwardedNewsletterMessageInfo: {
+                newsletterJid: '120363407155737368@newsletter',
+                newsletterName: 'LUCA BOT ✔',
+                serverMessageId: 127
+              }
+            }
+          };
           try {
-            const menuImage = fs.readFileSync("./images/menu-image.jpg");
+            const menuImagePath = path.join(__dirname, 'images/menu-image.jpg');
+            const menuImage = fs.readFileSync(menuImagePath);
             await sock.sendMessage(message.key.remoteJid, {
               image: menuImage,
               caption: getMenu(),
+              ...channelInfo
             });
           } catch (err) {
+            logger.debug({ error: err.message }, 'Menu image not found, sending text only');
             await sock.sendMessage(message.key.remoteJid, {
               text: getMenu(),
+              ...channelInfo
             });
           }
           return;
@@ -843,8 +2217,35 @@ We hope to see you again soon!`;
         if (command === "ping") {
           const now = Date.now();
           await sock.sendMessage(message.key.remoteJid, {
-            text: `📊 *PONG!*\n✅ Bot is online and responding\n⚡ Latency: ${Date.now() - now}ms\n🔧 Mode: ${botMode.toUpperCase()}`,
+            text: `PONG!\nBot is online and responding\nLatency: ${Date.now() - now}ms\nMode: ${botMode.toUpperCase()}`,
           });
+          return;
+        }
+
+        // ============================================
+        // Anti-Delete Command (Owner Only)
+        // ============================================
+        if (command === "antidel" && canUseAsOwner) {
+          const option = args[0]?.toLowerCase();
+          
+          if (option === "on") {
+            antiDeleteEnabled = true;
+            saveData();
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ *Anti-Delete Enabled*\n\nDeleted messages will be sent to your DM.`,
+            });
+          } else if (option === "off") {
+            antiDeleteEnabled = false;
+            messageCache.clear();
+            saveData();
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ *Anti-Delete Disabled*`,
+            });
+          } else {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `*Anti-Delete Status:* ${antiDeleteEnabled ? 'ON ✅' : 'OFF ❌'}\n\n*Usage:*\n.antidel on - Enable\n.antidel off - Disable\n\n_Deleted messages from groups & DMs will be sent to your DM._`,
+            });
+          }
           return;
         }
 
@@ -867,14 +2268,14 @@ We hope to see you again soon!`;
             const upperSym = symbol.toUpperCase();
 
             await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ Could not find data for *${upperSym}*
+              text: `Could not find data for *${upperSym}*
 
-💡 *Tips:*
-• Check if the symbol is correct
-• The coin might not be listed on CoinGecko
-• Try popular coins like: BTC, ETH, SOL, TON, BNB, ADA, XRP, DOGE, MATIC, DOT
+Tips:
+- Check if the symbol is correct
+- The coin might not be listed on CoinGecko
+- Try popular coins like: BTC, ETH, SOL, TON, BNB, ADA, XRP, DOGE, MATIC, DOT
 
-🔍 *How to add new coins:*
+How to add new coins:
 If you know the CoinGecko ID for ${upperSym}, contact the bot owner to add it.
 
 Example: Search "coingecko ${upperSym}" to find the correct ID.`,
@@ -895,21 +2296,21 @@ Example: Search "coingecko ${upperSym}" to find the correct ID.`,
             minimumFractionDigits: 0,
             maximumFractionDigits: 0
           });
-          const changeEmoji = change24h >= 0 ? "📈" : "📉";
+          const changeLabel = change24h >= 0 ? "UP" : "DOWN";
           const changeSign = change24h >= 0 ? "+" : "";
 
           await sock.sendMessage(message.key.remoteJid, {
-            text: `💹 *${data.symbol}* Live Price
+            text: `${data.symbol} Live Price
 
-💰 *Price:* $${price}
-${changeEmoji} *24h Change:* ${changeSign}${change24h}%
+Price: $${price}
+${changeLabel} 24h Change: ${changeSign}${change24h}%
 
-📊 *24h Stats:*
-📦 Volume: $${volume}
-💎 Market Cap: $${marketCap}
+24h Stats:
+Volume: $${volume}
+Market Cap: $${marketCap}
 
-⏰ Updated: ${new Date().toLocaleTimeString()}
-📡 Source: CoinGecko`,
+Updated: ${new Date().toLocaleTimeString()}
+Source: CoinGecko`,
           });
 
           await sock.sendMessage(message.key.remoteJid, {
@@ -921,13 +2322,13 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
         if (command === "public") {
           if (!isOwner) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only the bot owner can change bot mode!",
+              text: "Owner only.",
             });
             return;
           }
           botMode = "public";
           await sock.sendMessage(message.key.remoteJid, {
-            text: "✅ Bot is now *PUBLIC*\n\nAll users can now use bot commands!",
+            text: "✅ Bot set to public.",
           });
           logger.info('Bot mode changed to PUBLIC');
           return;
@@ -936,21 +2337,21 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
         if (command === "private") {
           if (!isOwner) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only the bot owner can change bot mode!",
+              text: "❌ Owner only.",
             });
             return;
           }
           botMode = "private";
           await sock.sendMessage(message.key.remoteJid, {
-            text: "🔐 Bot is now *PRIVATE*\n\nOnly the owner can use bot commands!",
+            text: "Bot set to private.",
           });
           logger.info('Bot mode changed to PRIVATE');
           return;
         }
 
-        if (command === "tagall" && canUseBot) {
+        if ((command === "tagall" || command === "tag" || command === "t") && canUseBot) {
           let mentions = [];
-          let tagText = "👥 *Group Members:*\n\n";
+          let tagText = "Group Members:\n\n";
 
           for (let member of groupMetadata.participants) {
             mentions.push(member.id);
@@ -980,25 +2381,14 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             await sock.sendMessage(message.key.remoteJid, {
               react: { text: "✅", key: message.key },
             });
-
-            setTimeout(async () => {
-              try {
-                await sock.sendMessage(message.key.remoteJid, {
-                  react: { text: "", key: message.key },
-                });
-              } catch (err) {
-                logger.error({ error: err.message }, 'Error removing reaction');
-              }
-            }, 5000);
           } catch (err) {
             logger.error({ error: err.message }, 'Hidetag error');
           }
           return;
         }
 
-        if (!canUseBot && text && text.startsWith(".")) {
-          return;
-        }
+        // This check is now redundant as we handle it earlier
+        // Removed duplicate check
 
         if (command === "setsticker" && canUseBot) {
           const cmdName = args[0]?.toLowerCase();
@@ -1007,34 +2397,87 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
 
           if (!sticker || !cmdName) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a sticker with *.setsticker [command]*\n\nSupported: kick, open, lock, vv, hidetag, pp, sticker, save",
+              text: "❌ Reply to a sticker with .setsticker [command]",
             });
             return;
           }
 
           if (!["kick", "open", "lock", "vv", "hidetag", "pp", "sticker", "save"].includes(cmdName)) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Supported commands: kick, open, lock, vv, hidetag, pp, sticker, save",
+              text: "❌ Commands: kick, open, lock, vv, hidetag, pp, sticker, save",
             });
             return;
           }
 
           if (cmdName === "sticker") {
-            stickerCommands[cmdName] = { type: "sticker_converter", hash: sticker.fileSha256?.toString('base64') };
+            const stickerHashValue = sticker.fileSha256 ? Buffer.from(sticker.fileSha256).toString('base64') : null;
+            stickerCommands[cmdName] = { type: "sticker_converter", hash: stickerHashValue };
             saveData(); // Persist to JSON
             await sock.sendMessage(message.key.remoteJid, {
-              text: `✅ Sticker set to *STICKER CONVERTER*!\n\nNow reply with this sticker to an image to convert it to a sticker!`,
+              text: `✅ Sticker set to *${cmdName.toUpperCase()}*.`,
             });
             return;
           }
 
-          const stickerHash = sticker.fileSha256?.toString('base64');
+          const stickerHash = sticker.fileSha256 ? Buffer.from(sticker.fileSha256).toString('base64') : null;
           stickerCommands[cmdName] = stickerHash || true;
           saveData(); // Persist to JSON
 
-          let successMsg = `✅ Sticker set to *${cmdName.toUpperCase()}*!`;
-          await sock.sendMessage(message.key.remoteJid, { text: successMsg });
-          logger.info({ command: cmdName }, 'Sticker command set');
+          await sock.sendMessage(message.key.remoteJid, { text: `✅ Sticker set to *${cmdName.toUpperCase()}*.` });
+          logger.info({ 
+            command: cmdName, 
+            hash: stickerHash,
+            hashLength: stickerHash?.length,
+            savedValue: stickerCommands[cmdName],
+            allCommands: JSON.stringify(stickerCommands)
+          }, 'SETSTICKER: Command saved successfully');
+          return;
+        }
+
+        // ============================================
+        // Take Sticker Command (save sticker with custom name)
+        // ============================================
+        if (command === "take" && canUseBot) {
+          try {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted?.stickerMessage) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Reply to a sticker.",
+              });
+              return;
+            }
+            
+            // Download the sticker
+            const stream = await downloadContentFromMessage(quoted.stickerMessage, 'sticker');
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+              buffer = Buffer.concat([buffer, chunk]);
+            }
+            
+            // Send back as sticker
+            await sock.sendMessage(message.key.remoteJid, {
+              sticker: buffer,
+            });
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "✅", key: message.key },
+            });
+
+            setTimeout(async () => {
+              try {
+                await sock.sendMessage(message.key.remoteJid, {
+                  react: { text: "", key: message.key },
+                });
+              } catch (err) {}
+            }, 1000);
+
+            logger.info('Sticker taken successfully');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Take sticker error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Failed to take sticker.",
+            });
+          }
           return;
         }
 
@@ -1043,15 +2486,17 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to an image with *.sticker*",
+                text: "❌ Reply to an image or video.",
               });
               return;
             }
 
             const imageMsg = quoted?.imageMessage;
-            if (!imageMsg) {
+            const videoMsg = quoted?.videoMessage;
+            
+            if (!imageMsg && !videoMsg) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to an image only!",
+                text: "❌ Image or video only.",
               });
               return;
             }
@@ -1060,16 +2505,30 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
               react: { text: "⏳", key: message.key },
             });
 
-            const stream = await downloadContentFromMessage(imageMsg, 'image');
-            let buffer = Buffer.from([]);
-            for await (const chunk of stream) {
-              buffer = Buffer.concat([buffer, chunk]);
+            // Get custom sticker name from args
+            const stickerName = args.join(' ').trim() || 'LUCA Bot';
+            
+            let stickerBuffer;
+            
+            if (imageMsg) {
+              const stream = await downloadContentFromMessage(imageMsg, 'image');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              stickerBuffer = await convertToSticker(buffer);
+            } else if (videoMsg) {
+              const stream = await downloadContentFromMessage(videoMsg, 'video');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              stickerBuffer = await convertVideoToSticker(buffer);
             }
-
-            const stickerBuffer = await convertToSticker(buffer);
+            
             if (!stickerBuffer) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Failed to convert image to sticker",
+                text: "❌ Failed to create sticker.",
               });
               return;
             }
@@ -1081,11 +2540,11 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             await sock.sendMessage(message.key.remoteJid, {
               react: { text: "✅", key: message.key },
             });
-            logger.info('Sticker created successfully');
+            logger.info({ stickerName }, 'Sticker created successfully');
           } catch (err) {
             logger.error({ error: err.message, stack: err.stack }, 'Sticker error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to create sticker: " + err.message,
+              text: "❌ Failed to create sticker.",
             });
           }
           return;
@@ -1096,7 +2555,7 @@ if (command === "vv" && canUseBot) {
             const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Usage Error:*\n\nReply to a view-once photo or video with the command *.vv* to save it.",
+                text: "❌ Reply to a view-once message.",
               });
               return;
             }
@@ -1104,7 +2563,7 @@ if (command === "vv" && canUseBot) {
             const viewOnceMsg = await extractViewOnceMedia(quoted);
             if (!viewOnceMsg) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Invalid Message:*\n\nThe message you replied to is not a view-once photo or video. Please check and try again.",
+                text: "❌ Not a view-once message.",
               });
               return;
             }
@@ -1116,14 +2575,14 @@ if (command === "vv" && canUseBot) {
             const media = await downloadViewOnceMedia(viewOnceMsg);
             if (!media || !media.mediaData) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Download Failed:*\n\nCould not download the view-once media. It might have expired, been deleted, or there was a network issue. Try again immediately.",
+                text: "❌ Download failed. Try again.",
               });
               return;
             }
 
             // Send the media back as a regular message to the current chat
             const sendOptions = {
-              caption: `✅ *LUCA View-Once Saver*\n\nOriginal Caption: ${media.caption || 'None'}`,
+              caption: media.caption || '',
             };
 
             if (media.mediaType === "image") {
@@ -1143,7 +2602,7 @@ if (command === "vv" && canUseBot) {
           } catch (error) {
             logger.error({ error: error.message, stack: error.stack }, 'VV command error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ *System Error:*\n\nAn unexpected error occurred while processing your request. Please report this to the bot owner with the command you used.",
+              text: "❌ Error processing view-once.",
             });
           }
           return;
@@ -1154,7 +2613,7 @@ if (command === "vv" && canUseBot) {
             const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Usage Error:*\n\nReply to a status (image/video) with *.save* to download it.",
+                text: "❌ Reply to a status to save it.",
               });
               return;
             }
@@ -1165,7 +2624,7 @@ if (command === "vv" && canUseBot) {
 
             if (!imageMsg && !videoMsg) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Invalid Message:*\n\nPlease reply to a status image or video with *.save*",
+                text: "❌ Reply to an image or video.",
               });
               return;
             }
@@ -1179,7 +2638,7 @@ if (command === "vv" && canUseBot) {
 
             if (!media || !media.mediaData) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Download Failed:*\n\nCould not download the status media. Please try again.",
+                text: "❌ Download failed.",
               });
               return;
             }
@@ -1189,7 +2648,7 @@ if (command === "vv" && canUseBot) {
 
             // Send the media to user's DM
             const sendOptions = {
-              caption: `💾 *Status Saved!*\n\n${media.caption ? `Original Caption: ${media.caption}` : 'No caption'}\n\n✅ Downloaded via LUCA Bot`,
+              caption: media.caption || '',
             };
 
             if (media.mediaType === "image") {
@@ -1207,7 +2666,7 @@ if (command === "vv" && canUseBot) {
 
             // Notify in group
             await sock.sendMessage(message.key.remoteJid, {
-              text: `✅ Status saved and sent to your DM!`,
+              text: `✅ Sent to your DM.`,
             }, { quoted: message });
 
             logger.info({ sender: senderJid, mediaType: media.mediaType }, 'Status saved');
@@ -1215,18 +2674,205 @@ if (command === "vv" && canUseBot) {
           } catch (error) {
             logger.error({ error: error.message, stack: error.stack }, 'Save command error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ *System Error:*\n\nFailed to save status. Please try again or contact the bot owner.",
+              text: "❌ Failed to save.",
             });
           }
           return;
         }
 
-        if (message.message.stickerMessage && !text && canUseBot) {
-          const stickerHash = message.message.stickerMessage.fileSha256?.toString('base64');
+        if (command === "play" && canUseBot) {
+          await playSongCommand(sock, message, args, logger);
+          return;
+        }
+
+        // ============================================
+        // TikTok Video Downloader
+        // ============================================
+        if ((command === "tt" || command === "tiktok") && canUseBot) {
+          let tiktokUrl = args.join(' ').trim();
+          
+          // Check if replying to a message with a TikTok URL
+          if (!tiktokUrl) {
+            const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quotedMsg) {
+              const quotedText = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
+              const urlMatch = quotedText.match(/https?:\/\/(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)[^\s]*/i);
+              if (urlMatch) {
+                tiktokUrl = urlMatch[0];
+              }
+            }
+          }
+          
+          if (!tiktokUrl || !tiktokUrl.match(/tiktok\.com/i)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ *Usage:* .tt [tiktok url]\n\nOr reply to a TikTok link with .tt`,
+            });
+            return;
+          }
+          
+          // React with timer while processing
+          await sock.sendMessage(message.key.remoteJid, {
+            react: { text: "⏳", key: message.key },
+          });
+          
+          try {
+            const apiUrl = `https://apis.davidcyriltech.my.id/download/tiktokv4?url=${encodeURIComponent(tiktokUrl)}`;
+            const response = await axios.get(apiUrl, { timeout: 30000 });
+            
+            if (response.data && response.data.success && response.data.results) {
+              const results = response.data.results;
+              const videoUrl = results.no_watermark || results.watermark;
+              
+              if (videoUrl) {
+                // Change reaction to success
+                await sock.sendMessage(message.key.remoteJid, {
+                  react: { text: "✅", key: message.key },
+                });
+                
+                // Send the video
+                await sock.sendMessage(message.key.remoteJid, {
+                  video: { url: videoUrl },
+                  caption: `🎵 *TikTok Download*`,
+                });
+              } else {
+                throw new Error('No video URL found');
+              }
+            } else {
+              throw new Error(response.data?.message || 'API error');
+            }
+          } catch (error) {
+            logger.error({ error: error.message }, 'TikTok download error');
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "❌", key: message.key },
+            });
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ Failed to download TikTok video.\n\n_Try again or check if the URL is valid._`,
+            });
+          }
+          return;
+        }
+
+        // ============================================
+        // Facebook Video Downloader
+        // ============================================
+        if ((command === "fb" || command === "facebook") && canUseBot) {
+          let fbUrl = args.join(' ').trim();
+          
+          // Check if replying to a message with a Facebook URL
+          if (!fbUrl) {
+            const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quotedMsg) {
+              const quotedText = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
+              const urlMatch = quotedText.match(/https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)[^\s]*/i);
+              if (urlMatch) {
+                fbUrl = urlMatch[0];
+              }
+            }
+          }
+          
+          if (!fbUrl || !fbUrl.match(/(facebook\.com|fb\.watch|fb\.com)/i)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ *Usage:* .fb [facebook url]\n\nOr reply to a Facebook video link with .fb`,
+            });
+            return;
+          }
+          
+          // React with timer while processing
+          await sock.sendMessage(message.key.remoteJid, {
+            react: { text: "⏳", key: message.key },
+          });
+          
+          try {
+            const apiUrl = `https://apis.davidcyriltech.my.id/facebook3?url=${encodeURIComponent(fbUrl)}&apikey=`;
+            const response = await axios.get(apiUrl, { timeout: 30000 });
+            
+            if (response.data && response.data.success && response.data.result) {
+              const result = response.data.result;
+              const videoUrl = result.hd || result.sd || result.video;
+              
+              if (videoUrl) {
+                // Change reaction to success
+                await sock.sendMessage(message.key.remoteJid, {
+                  react: { text: "✅", key: message.key },
+                });
+                
+                // Send the video
+                await sock.sendMessage(message.key.remoteJid, {
+                  video: { url: videoUrl },
+                  caption: `📘 *Facebook Download*\n\n📝 ${result.title || 'Facebook Video'}`,
+                });
+              } else {
+                throw new Error('No video URL found');
+              }
+            } else {
+              throw new Error(response.data?.message || 'API error');
+            }
+          } catch (error) {
+            logger.error({ error: error.message }, 'Facebook download error');
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "❌", key: message.key },
+            });
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ Failed to download Facebook video.\n\n_Try again or check if the URL is valid._`,
+            });
+          }
+          return;
+        }
+
+        // STICKER COMMAND DETECTION
+        // Use canUseAsOwner OR canUseBot OR fromMe to ensure owner can use stickers in private mode
+        const canUseStickerCmd = canUseAsOwner || canUseBot || message.key.fromMe;
+        
+        // Verbose debug logging disabled
+        // logger.info({ 
+        //   hasStickerMessage: !!message.message.stickerMessage,
+        //   text: text,
+        //   textEmpty: !text,
+        //   canUseBot: canUseBot,
+        //   canUseAsOwner: canUseAsOwner,
+        //   fromMe: message.key.fromMe,
+        //   canUseStickerCmd: canUseStickerCmd,
+        //   willProcess: !!(message.message.stickerMessage && !text && canUseStickerCmd)
+        // }, 'STICKER DEBUG: Pre-check');
+
+        if (message.message.stickerMessage && !text && canUseStickerCmd) {
+          const stickerHash = message.message.stickerMessage.fileSha256 ? Buffer.from(message.message.stickerMessage.fileSha256).toString('base64') : null;
+          
+          // Debug logging disabled
+          // logger.info({ 
+          //   stickerDetected: true, 
+          //   receivedHash: stickerHash,
+          //   hashLength: stickerHash?.length,
+          //   savedCommandsCount: Object.keys(stickerCommands).length,
+          //   savedCommands: JSON.stringify(stickerCommands),
+          //   group: message.key.remoteJid 
+          // }, 'STICKER: Detected sticker message');
+
+          // if (Object.keys(stickerCommands).length === 0) {
+          //   logger.warn('STICKER: No saved sticker commands found!');
+          // }
 
           for (const [cmdName, hash] of Object.entries(stickerCommands)) {
-            if (hash === stickerHash || hash === true || (typeof hash === 'object' && hash.hash === stickerHash)) {
-              logger.info({ command: cmdName }, 'Sticker command triggered');
+            const hashMatch = hash === stickerHash;
+            const isTrue = hash === true;
+            const objMatch = typeof hash === 'object' && hash.hash === stickerHash;
+            
+            // Debug logging disabled
+            // logger.info({ 
+            //   cmdName, 
+            //   hashMatch, 
+            //   isTrue, 
+            //   objMatch,
+            //   savedHashType: typeof hash,
+            //   savedHash: typeof hash === 'object' ? hash.hash : hash, 
+            //   savedHashLength: (typeof hash === 'object' ? hash.hash : hash)?.length,
+            //   receivedHash: stickerHash,
+            //   receivedHashLength: stickerHash?.length,
+            //   exactMatch: (typeof hash === 'object' ? hash.hash : hash) === stickerHash
+            // }, 'STICKER: Checking command match');
+            
+            if (hashMatch || isTrue || objMatch) {
+              logger.info({ command: cmdName }, 'STICKER: Command triggered!');
 
               if (cmdName === "vv") {
                 try {
@@ -1263,7 +2909,7 @@ if (command === "vv" && canUseBot) {
                         react: { text: "", key: message.key },
                       });
                     } catch (err) {}
-                  }, 5000);
+                  }, 1000);
                 } catch (err) {
                   logger.error({ error: err.message }, 'Sticker vv error');
                 }
@@ -1319,7 +2965,7 @@ if (command === "vv" && canUseBot) {
                     });
                   } else {
                     await sock.sendMessage(message.key.remoteJid, {
-                      text: "❌ Profile picture is private or unavailable",
+                      text: "❌ Profile picture unavailable.",
                     });
                   }
                 } catch (err) {
@@ -1368,7 +3014,7 @@ if (command === "vv" && canUseBot) {
 
                   // Send the media to user's DM
                   const sendOptions = {
-                    caption: `💾 *Status Saved!*\n\n${media.caption ? `Original Caption: ${media.caption}` : 'No caption'}\n\n✅ Downloaded via LUCA Bot (Sticker)`,
+                    caption: `Status saved!\n\n${media.caption ? `Original Caption: ${media.caption}` : 'No caption'}\n\nDownloaded via LUCA Bot (Sticker)`,
                   };
 
                   if (media.mediaType === "image") {
@@ -1381,7 +3027,7 @@ if (command === "vv" && canUseBot) {
 
                   // Send success reaction
                   await sock.sendMessage(message.key.remoteJid, {
-                    react: { text: "✅", key: message.key },
+                    react: { text: "OK", key: message.key },
                   });
 
                   setTimeout(async () => {
@@ -1402,11 +3048,11 @@ if (command === "vv" && canUseBot) {
                   const contextInfo = message.message.stickerMessage?.contextInfo;
                   const targetJid = contextInfo?.participant;
 
-                  if (targetJid && botIsAdmin) {
+                  if (targetJid && ownerIsAdmin) {
                     try {
                       await sock.groupParticipantsUpdate(message.key.remoteJid, [targetJid], "remove");
                       await sock.sendMessage(message.key.remoteJid, {
-                        react: { text: "✅", key: message.key },
+                        react: { text: "OK", key: message.key },
                       });
                     } catch (err) {
                       logger.error({ error: err.message }, 'Sticker kick error');
@@ -1414,6 +3060,7 @@ if (command === "vv" && canUseBot) {
                   }
                   return;
                 } else if (cmdName === "open") {
+                  if (!ownerIsAdmin) return;
                   try {
                     lockedGroups.delete(message.key.remoteJid);
                     await sock.groupSettingUpdate(message.key.remoteJid, "not_announcement");
@@ -1425,6 +3072,7 @@ if (command === "vv" && canUseBot) {
                   }
                   return;
                 } else if (cmdName === "lock") {
+                  if (!ownerIsAdmin) return;
                   try {
                     lockedGroups.add(message.key.remoteJid);
                     await sock.groupSettingUpdate(message.key.remoteJid, "announcement");
@@ -1442,12 +3090,12 @@ if (command === "vv" && canUseBot) {
           return;
         }
 
-        if (!isAdmin && !isOwner) return;
+        if (!isAdmin && !canUseAsOwner) return;
 
-        if (command === "lock") {
-          if (!botIsAdmin) {
+        if (command === "lock" || command === "close" || command === "mute") {
+          if (!ownerIsAdmin) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Bot needs to be admin to lock the group!",
+              text: "❌ Bot needs admin.",
             });
             return;
           }
@@ -1467,10 +3115,10 @@ if (command === "vv" && canUseBot) {
           return;
         }
 
-        if (command === "open") {
-          if (!botIsAdmin) {
+        if (command === "open" || command === "unmute") {
+          if (!ownerIsAdmin) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Bot needs to be admin to open the group!",
+              text: "❌ Bot needs admin.",
             });
             return;
           }
@@ -1490,72 +3138,99 @@ if (command === "vv" && canUseBot) {
           return;
         }
 
-        if (command === "get" && args[0]?.toLowerCase() === "pp") {
-          const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
-          if (!quoted) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a user's message to get their profile picture",
-            });
-            return;
+        if (command === "getpp") {
+          let targetJid = null;
+          
+          // Check if replying to a message
+          const quoted = message.message.extendedTextMessage?.contextInfo;
+          if (quoted?.participant) {
+            targetJid = normalizeJid(quoted.participant);
+          } else if (quoted?.mentionedJid?.length > 0) {
+            targetJid = normalizeJid(quoted.mentionedJid[0]);
           }
-
-          let targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
+          
+          // Check for @mentions in the command
+          const mentionedJids = message.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+          if (!targetJid && mentionedJids.length > 0) {
+            targetJid = normalizeJid(mentionedJids[0]);
+          }
+          
+          // Check for number in args
+          if (!targetJid && args[0]) {
+            const num = args[0].replace(/[^0-9]/g, '');
+            if (num.length >= 10) {
+              targetJid = `${num}@s.whatsapp.net`;
+            }
+          }
+          
           if (!targetJid) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Could not identify the user",
+              text: "❌ Reply to a message, mention someone, or provide a number.\n\nUsage:\n• Reply to message with .getpp\n• .getpp @user\n• .getpp 2348012345678",
             });
             return;
           }
-
-          targetJid = normalizeJid(targetJid);
 
           try {
             let ppUrl = null;
             try {
               ppUrl = await sock.profilePictureUrl(targetJid, "image");
             } catch (err1) {
+              // Try without quality parameter
               try {
-                ppUrl = await sock.profilePictureUrl(targetJid, "display");
+                ppUrl = await sock.profilePictureUrl(targetJid);
               } catch (err2) {}
             }
 
             if (ppUrl) {
+              // Download the image and send it
+              const response = await axios.get(ppUrl, { responseType: 'arraybuffer' });
+              const imageBuffer = Buffer.from(response.data);
+              
               await sock.sendMessage(message.key.remoteJid, {
-                image: { url: ppUrl },
-                caption: `Profile: @${targetJid.split("@")[0]}`,
+                image: imageBuffer,
+                caption: `👤 Profile Picture\n📱 @${targetJid.split("@")[0]}`,
                 mentions: [targetJid]
               });
             } else {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Profile picture is private or unavailable",
+                text: "❌ Profile picture unavailable or hidden.",
               });
             }
           } catch (err) {
             logger.error({ error: err.message }, 'Get PP error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Error: " + err.message,
+              text: "❌ Could not fetch profile picture. User may have privacy settings enabled.",
             });
           }
           return;
         }
 
         if (command === "kick") {
-          if (!botIsAdmin) {
+          if (!ownerIsAdmin) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Bot needs to be admin to kick users!",
+              text: "❌ Bot needs admin.",
             });
             return;
           }
 
-          const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
-          if (!quoted) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a message to kick that user",
-            });
-            return;
+          let targetJid = null;
+          
+          // Check for @mentions first
+          const mentions = message.message.extendedTextMessage?.contextInfo?.mentionedJid;
+          if (mentions && mentions.length > 0) {
+            targetJid = mentions[0]; // Use first mentioned user
+          } else {
+            // Fallback to reply method
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Reply or mention a user.",
+              });
+              return;
+            }
+            targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
           }
 
-          const targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
           if (targetJid) {
             try {
               await sock.groupParticipantsUpdate(message.key.remoteJid, [targetJid], "remove");
@@ -1574,15 +3249,24 @@ if (command === "vv" && canUseBot) {
         }
 
         if (command === "warn") {
-          const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
-          if (!quoted) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a user's message to warn them",
-            });
-            return;
+          let targetJid = null;
+          
+          // Check for @mentions first
+          const mentions = message.message.extendedTextMessage?.contextInfo?.mentionedJid;
+          if (mentions && mentions.length > 0) {
+            targetJid = mentions[0]; // Use first mentioned user
+          } else {
+            // Fallback to reply method
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Reply or mention a user.",
+              });
+              return;
+            }
+            targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
           }
-
-          const targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
+          
           if (!targetJid) return;
 
           const groupId = message.key.remoteJid;
@@ -1593,37 +3277,89 @@ if (command === "vv" && canUseBot) {
           const warnCount = userWarns[groupId][targetJid];
           saveData(); // Persist warnings
 
-          if (warnCount >= 2) {
+          if (warnCount >= 3) {
             // Always try to kick, check for errors
             try {
               await sock.groupParticipantsUpdate(groupId, [targetJid], "remove");
               await sock.sendMessage(groupId, {
-                text: `⚠️ *@${targetJid.split("@")[0]}* received 2 warnings and has been kicked!`,
+                text: `⚠️ @${targetJid.split("@")[0]} kicked (3 warnings).`,
                 mentions: [targetJid]
               });
               delete userWarns[groupId][targetJid];
               saveData(); // Save after removing warn count
-              logger.info({ target: targetJid }, 'User kicked after 2 warnings');
+              logger.info({ target: targetJid }, 'User kicked after 3 warnings');
             } catch (err) {
               logger.error({ error: err.message }, 'Auto-kick error');
               await sock.sendMessage(groupId, {
-                text: `⚠️ *@${targetJid.split("@")[0]}* has 2 warnings!\n\n❌ Could not kick: ${err.message}\n\nMake sure bot is admin with kick permissions.`,
+                text: `⚠️ @${targetJid.split("@")[0]} has 3 warnings. Could not kick - check bot permissions.`,
                 mentions: [targetJid]
               });
             }
           } else {
             await sock.sendMessage(groupId, {
-              text: `⚠️ *Warning ${warnCount}/2* - @${targetJid.split("@")[0]}\n\n⛔ One more warning = KICK!`,
+              text: `⚠️ Warning ${warnCount}/3 - @${targetJid.split("@")[0]}`,
               mentions: [targetJid]
             });
           }
           return;
         }
 
-        if (command === "promote") {
-          if (!botIsAdmin) {
+        if (command === "unwarn") {
+          let targetJid = null;
+          
+          // Check for @mentions first
+          const mentions = message.message.extendedTextMessage?.contextInfo?.mentionedJid;
+          if (mentions && mentions.length > 0) {
+            targetJid = mentions[0]; // Use first mentioned user
+          } else {
+            // Fallback to reply method
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Reply or mention a user.",
+              });
+              return;
+            }
+            targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
+          }
+          
+          if (!targetJid) return;
+
+          const groupId = message.key.remoteJid;
+          
+          if (!userWarns[groupId] || !userWarns[groupId][targetJid]) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Bot needs to be admin to promote users!",
+              text: `ℹ️ @${targetJid.split("@")[0]} has no warnings.`,
+              mentions: [targetJid]
+            });
+            return;
+          }
+
+          const warnCount = userWarns[groupId][targetJid];
+          userWarns[groupId][targetJid]--;
+          
+          if (userWarns[groupId][targetJid] <= 0) {
+            delete userWarns[groupId][targetJid];
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ @${targetJid.split("@")[0]} warnings cleared.`,
+              mentions: [targetJid]
+            });
+          } else {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ @${targetJid.split("@")[0]} warning: ${warnCount} → ${userWarns[groupId][targetJid]}`,
+              mentions: [targetJid]
+            });
+          }
+          
+          saveData(); // Persist warning changes
+          logger.info({ target: targetJid, newWarnCount: userWarns[groupId][targetJid] || 0 }, 'Warning removed');
+          return;
+        }
+
+        if (command === "promote") {
+          if (!ownerIsAdmin) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Bot needs admin.",
             });
             return;
           }
@@ -1631,7 +3367,7 @@ if (command === "vv" && canUseBot) {
           const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
           if (!quoted) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a user's message to promote them",
+              text: "❌ Reply to a message.",
             });
             return;
           }
@@ -1648,16 +3384,16 @@ if (command === "vv" && canUseBot) {
           } catch (err) {
             logger.error({ error: err.message }, 'Promote error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to promote user",
+              text: "❌ Failed to promote.",
             });
           }
           return;
         }
 
         if (command === "demote") {
-          if (!botIsAdmin) {
+          if (!ownerIsAdmin) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Bot needs to be admin to demote users!",
+              text: "❌ Bot needs admin.",
             });
             return;
           }
@@ -1665,7 +3401,7 @@ if (command === "vv" && canUseBot) {
           const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
           if (!quoted) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a user's message to demote them",
+              text: "❌ Reply to a message.",
             });
             return;
           }
@@ -1682,7 +3418,7 @@ if (command === "vv" && canUseBot) {
           } catch (err) {
             logger.error({ error: err.message }, 'Demote error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to demote user",
+              text: "❌ Failed to demote.",
             });
           }
           return;
@@ -1692,7 +3428,7 @@ if (command === "vv" && canUseBot) {
           const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
           if (!quoted) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a user's message to block them",
+              text: "❌ Reply to a message.",
             });
             return;
           }
@@ -1736,9 +3472,9 @@ if (command === "vv" && canUseBot) {
         }
 
         if (command === "antilink") {
-          if (!isAdmin && !isOwner) {
+          if (!isAdmin && !canUseAsOwner) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ This command is for admins only!",
+              text: "❌ Admins only.",
             });
             return;
           }
@@ -1760,22 +3496,17 @@ if (command === "vv" && canUseBot) {
           adminSettings[message.key.remoteJid].antilink = isOn;
           saveData(); // Persist to JSON
 
-          const status = isOn ? "✅ *ENABLED*" : "❌ *DISABLED*";
-          const messageText = isOn
-            ? `🔗 Antilink ${status}\n\n⚠️ *How it works:*\n• User sends link → Message deleted + Warning 1/2\n• User sends another link → Warning 2/2 + REMOVED!\n\n${botIsAdmin ? "✅ Bot is admin - ready to enforce!" : "⚠️ Make bot admin to enable auto-kick!"}`
-            : `🔗 Antilink ${status}\n\nUsers can send links freely.`;
-
           await sock.sendMessage(message.key.remoteJid, {
-            text: messageText,
+            text: isOn ? "Antilink enabled." : "Antilink disabled.",
           });
           logger.info({ group: message.key.remoteJid, enabled: isOn }, 'Antilink toggled');
           return;
         }
 
         if (command === "setwelcome") {
-          if (!isAdmin && !isOwner) {
+          if (!isGroupAdmin) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only admins can set custom welcome messages!",
+              text: "❌ Admins only.",
             });
             return;
           }
@@ -1785,24 +3516,7 @@ if (command === "vv" && canUseBot) {
 
           if (!welcomeText) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ *Usage Error!*
-
-📝 *How to set welcome message:*
-
-.setwelcome [your message]
-
-*Available variables:*
-• {user} - Mentions the new member
-
-*Examples:*
-
-.setwelcome Welcome {user}! 👋 Please read the rules.
-
-.setwelcome Hey {user}! 🎉 We're happy to have you here! Type .menu to see bot commands.
-
-.setwelcome 🌟 {user} just joined! Welcome to the best group ever!
-
-*Note:* Use {user} where you want to mention the new member.`,
+              text: `❌ *Usage:* .setwelcome [message]\n\n📝 *Available Placeholders:*\n• {user} - Mention new member\n• {username} - Member's name\n• {groupname} - Group name\n• {desc} - Group description\n• {membercount} - Total members\n\n*Example:*\n.setwelcome Welcome {user} to {groupname}! We now have {membercount} members! 🎉`,
             });
             return;
           }
@@ -1812,14 +3526,7 @@ if (command === "vv" && canUseBot) {
           saveData(); // Persist to JSON
 
           await sock.sendMessage(message.key.remoteJid, {
-            text: `✅ *Custom Welcome Message Set!*
-
-📝 *Preview:*
-${welcomeText.replace(/{user}/g, '@YourName')}
-
-✨ New members will see this message when they join!
-
-*Tip:* Use *.resetwelcome* to restore default message.`,
+            text: `✅ Welcome message set!\n\n_Preview placeholders:_\n• {user} → @mention\n• {username} → username\n• {groupname} → group name\n• {desc} → group description\n• {membercount} → member count`,
           });
 
           logger.info({
@@ -1830,16 +3537,16 @@ ${welcomeText.replace(/{user}/g, '@YourName')}
         }
 
         if (command === "resetwelcome") {
-          if (!isAdmin && !isOwner) {
+          if (!isGroupAdmin) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only admins can reset welcome messages!",
+              text: "❌ Admins only.",
             });
             return;
           }
 
           if (!customWelcomeMessages[message.key.remoteJid]) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "ℹ️ This group is already using the default welcome message!",
+              text: "ℹ️ Already using default welcome message.",
             });
             return;
           }
@@ -1849,30 +3556,75 @@ ${welcomeText.replace(/{user}/g, '@YourName')}
           saveData(); // Persist to JSON
 
           await sock.sendMessage(message.key.remoteJid, {
-            text: `🔄 *Welcome Message Reset!*
-
-✅ Restored to default LUCA welcome message.
-
-New members will now see:
-👋 *Welcome to the Group!*
-
-Hello @YourName, we're glad to have you here!
-
-*LUCA🤍* is here to help. Type *.menu* to see all available commands.
-
-Please read the group rules and enjoy your stay!
-
-*Tip:* Use *.setwelcome* to set a custom message again.`,
+            text: `Welcome message reset to default.`,
           });
 
           logger.info({ group: message.key.remoteJid }, 'Welcome message reset to default');
           return;
         }
 
-        if (command === "anonymous") {
-          if (!isAdmin && !isOwner) {
+        if (command === "welcome") {
+          if (!isGroupAdmin) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only admins can start anonymous sessions!",
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const action = args[0]?.toLowerCase();
+
+          if (!action || (action !== "on" && action !== "off")) {
+            const currentStatus = welcomeEnabled[message.key.remoteJid] ? "ON ✅" : "OFF ❌";
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `📝 *Welcome Messages*\n\nCurrent status: *${currentStatus}*\n\n*Usage:*\n• .welcome on - Enable welcome messages\n• .welcome off - Disable welcome messages\n• .setwelcome [msg] - Set custom message\n• .resetwelcome - Reset to default message`,
+            });
+            return;
+          }
+
+          const isOn = action === "on";
+          welcomeEnabled[message.key.remoteJid] = isOn;
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: isOn ? "✅ Welcome messages enabled for this group." : "❌ Welcome messages disabled for this group.",
+          });
+          logger.info({ group: message.key.remoteJid, enabled: isOn }, 'Welcome toggled');
+          return;
+        }
+
+        if (command === "goodbye") {
+          if (!isGroupAdmin) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const action = args[0]?.toLowerCase();
+
+          if (!action || (action !== "on" && action !== "off")) {
+            const currentStatus = goodbyeEnabled[message.key.remoteJid] ? "ON ✅" : "OFF ❌";
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `📝 *Goodbye Messages*\n\nCurrent status: *${currentStatus}*\n\n*Usage:*\n• .goodbye on - Enable goodbye messages\n• .goodbye off - Disable goodbye messages`,
+            });
+            return;
+          }
+
+          const isOn = action === "on";
+          goodbyeEnabled[message.key.remoteJid] = isOn;
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: isOn ? "✅ Goodbye messages enabled for this group." : "❌ Goodbye messages disabled for this group.",
+          });
+          logger.info({ group: message.key.remoteJid, enabled: isOn }, 'Goodbye toggled');
+          return;
+        }
+
+        if (command === "anonymous") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "Admins only.",
             });
             return;
           }
@@ -1887,70 +3639,70 @@ Please read the group rules and enjoy your stay!
           }
 
           if (existingSessionId) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: `⚠️ *Anonymous session already active!*\n\n🔗 Link: ${ANONYMOUS_WEB_URL}/${existingSessionId}\n\nUse *.end* to close the current session.`,
-            });
+            // Session already active, silently return (the session link was already sent)
             return;
           }
 
           try {
             // Lock the group
-            if (botIsAdmin) {
+            if (ownerIsAdmin) {
               await sock.groupSettingUpdate(message.key.remoteJid, "announcement");
               lockedGroups.add(message.key.remoteJid);
             }
 
             // Create anonymous session
-            const sessionId = await createAnonymousSession(message.key.remoteJid);
+            const result = await createAnonymousSession(message.key.remoteJid);
 
-            if (!sessionId) {
+            if (!result) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Failed to create anonymous session. Make sure the web server is running!",
+                text: "Failed to create anonymous session. Make sure the web server is running!",
               });
               return;
             }
 
-            const sessionLink = `${ANONYMOUS_WEB_URL}/${sessionId}`;
+            const { sessionId, token } = result;
+            const sessionLink = `${ANONYMOUS_WEB_URL}/${token}`;
 
             await sock.sendMessage(message.key.remoteJid, {
-              text: `🎭 *Anonymous Game Started!*
+              text: `╭━━━━━━━━━━━━━━━━━╮
+┃  🎭 *ANONYMOUS GAME* 🎭
+╰━━━━━━━━━━━━━━━━━╯
 
-${botIsAdmin ? '🔒 Group is now locked' : '⚠️ Bot needs admin rights to lock group'}
+✅ *Anonymous Game Started!*
+${ownerIsAdmin ? '🔒 _Group has been locked_' : '⚠️ _Give admin to lock group_'}
 
-🔗 *Send your anonymous messages here:*
+━━━━━━━━━━━━━━━━━━━
+📨 *Send your anonymous messages to:*
 ${sessionLink}
+━━━━━━━━━━━━━━━━━━━
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+⏰ _Link will expire after 20 mins of inactivity_
 
-📝 *How it works:*
-• Click the link above
-• Type your message
-• It will be posted here anonymously
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🛑 To end this session, use *.end*`,
+📌 Type *.end* to stop the game`,
             });
 
             logger.info({ sessionId, groupJid: message.key.remoteJid }, 'Anonymous session started');
           } catch (error) {
             logger.error({ error: error.message }, 'Anonymous command error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to start anonymous session: " + error.message,
+              text: "Failed to start anonymous session: " + error.message,
             });
           }
           return;
         }
 
+        // Universal .end command for all games (anonymous, wcg, rtw)
         if (command === "end") {
-          if (!isAdmin && !isOwner) {
+          if (!isAdmin && !canUseAsOwner) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only admins can end anonymous sessions!",
+              text: "❌ Admins only.",
             });
             return;
           }
 
-          // Find active session for this group
+          let gameEnded = false;
+
+          // Check for active anonymous session
           let activeSessionId = null;
           for (const [sessionId, session] of anonymousSessions.entries()) {
             if (session.groupJid === message.key.remoteJid && session.active) {
@@ -1959,46 +3711,118 @@ ${sessionLink}
             }
           }
 
-          if (!activeSessionId) {
+          if (activeSessionId) {
+            try {
+              const session = anonymousSessions.get(activeSessionId);
+              const messageCount = session?.messageCount || 0;
+              
+              await endAnonymousSession(activeSessionId);
+
+              if (ownerIsAdmin) {
+                await sock.groupSettingUpdate(message.key.remoteJid, "not_announcement");
+                lockedGroups.delete(message.key.remoteJid);
+              }
+
+              await sock.sendMessage(message.key.remoteJid, {
+                text: `*ANONYMOUS*\n\nSession ended\nMessages: ${messageCount}${ownerIsAdmin ? "\nGroup unlocked" : ""}`,
+              });
+              gameEnded = true;
+            } catch (error) {
+              logger.error({ error: error.message }, 'End anonymous error');
+            }
+          }
+
+          // Check for active WCG game
+          if (wcgGames.has(message.key.remoteJid)) {
+            await forceEndWCGGame(sock, message.key.remoteJid);
+            gameEnded = true;
+          }
+
+          // Check for active RTW game
+          if (rtwGames.has(message.key.remoteJid)) {
+            await endRTWGame(sock, message.key.remoteJid, 'stopped');
+            gameEnded = true;
+          }
+
+          // No active games found
+          if (!gameEnded) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ No active anonymous session found in this group!",
+              text: "❌ No active games found!",
+            });
+          }
+
+          return;
+        }
+
+        if (command === "rtw") {
+          // Check if there's already an active game
+          if (rtwGames.has(message.key.remoteJid)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "RTW game in progress!\nUse .end to stop it.",
             });
             return;
           }
 
-          try {
-            // End the session
-            await endAnonymousSession(activeSessionId);
+          // Create new game
+          createRTWGame(message.key.remoteJid, sender);
 
-            // Unlock the group
-            if (botIsAdmin) {
-              await sock.groupSettingUpdate(message.key.remoteJid, "not_announcement");
-              lockedGroups.delete(message.key.remoteJid);
-            }
+          // Start join phase immediately
+          await startRTWJoinPhase(sock, message.key.remoteJid);
+          logger.info({ groupJid: message.key.remoteJid, owner: sender }, 'RTW game created');
+          return;
+        }
 
-            const session = anonymousSessions.get(activeSessionId);
-            const messageCount = session?.messageCount || 0;
-
+        // WCG (Word Chain Game) Commands
+        if (command === "wcg") {
+          // Check if there's already an active game
+          if (wcgGames.has(message.key.remoteJid)) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: `🛑 *Anonymous Session Ended!*
-
-${botIsAdmin ? '🔓 Group is now unlocked' : ''}
-
-📊 *Session Stats:*
-• Total Messages: ${messageCount}
-• Session ID: ${activeSessionId}
-
-The anonymous link is no longer active.
-Thank you for participating! 🎭`,
+              text: "WCG game in progress!\nUse .end to stop it.",
             });
-
-            logger.info({ sessionId: activeSessionId, messageCount }, 'Anonymous session ended');
-          } catch (error) {
-            logger.error({ error: error.message }, 'End command error');
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to end anonymous session: " + error.message,
-            });
+            return;
           }
+
+          // Create new game
+          createWCGGame(message.key.remoteJid, sender);
+          
+          // Start join phase
+          await startWCGJoinPhase(sock, message.key.remoteJid);
+          logger.info({ groupJid: message.key.remoteJid, owner: sender }, 'WCG game created');
+          return;
+        }
+
+        if (command === "wcgstat" || command === "wcgstats") {
+          const stats = wcgStats[message.key.remoteJid];
+          
+          if (!stats || stats.totalGames === 0) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "WCG Stats\nNo games played yet!",
+            });
+            return;
+          }
+
+          // Find all-time winner
+          let allTimeWinner = null;
+          let maxWins = 0;
+          for (const [jid, wins] of Object.entries(stats.wins)) {
+            if (wins > maxWins) {
+              maxWins = wins;
+              allTimeWinner = jid;
+            }
+          }
+
+          const mentions = [];
+          if (allTimeWinner) mentions.push(allTimeWinner);
+          if (stats.longestWord.player) mentions.push(stats.longestWord.player);
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `WCG STATS
+Games: ${stats.totalGames}
+All-Time Champ: @${allTimeWinner ? allTimeWinner.split('@')[0] : 'N/A'}
+Wins: ${maxWins}
+Longest Word: "${stats.longestWord.word || 'N/A'}" (${stats.longestWord.length || 0} letters) by @${stats.longestWord.player ? stats.longestWord.player.split('@')[0] : 'N/A'}`,
+            mentions
+          });
           return;
         }
 
@@ -2007,7 +3831,7 @@ Thank you for participating! 🎭`,
             const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to a message to delete it",
+                text: "❌ Reply to a message.",
               });
               return;
             }
@@ -2030,7 +3854,7 @@ Thank you for participating! 🎭`,
           } catch (err) {
             logger.error({ error: err.message }, 'Delete error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to delete message: " + err.message,
+              text: "❌ Failed to delete.",
             });
           }
           return;
@@ -2039,7 +3863,7 @@ Thank you for participating! 🎭`,
         if (command === "vcf") {
           if (!isOwner) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only the bot owner can export group contacts!",
+              text: "❌ Owner only.",
             });
             return;
           }
@@ -2055,7 +3879,7 @@ Thank you for participating! 🎭`,
 
             if (!participants || participants.length === 0) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ No participants found in this group!",
+                text: "❌ No participants found.",
               });
               return;
             }
@@ -2077,7 +3901,7 @@ Thank you for participating! 🎭`,
               document: fs.readFileSync(filepath),
               fileName: filename,
               mimetype: 'text/vcard',
-              caption: `📇 *Group Contacts Export*\n\n✅ Exported ${participants.length} contacts\n📅 Date: ${timestamp}\n👥 Group: ${groupMetadata.subject}`
+              caption: `Exported ${participants.length} contacts.`
             });
 
             // Clean up - delete the file after sending
@@ -2095,46 +3919,272 @@ Thank you for participating! 🎭`,
           } catch (error) {
             logger.error({ error: error.message, stack: error.stack }, 'VCF export error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to export contacts: " + error.message,
+              text: "❌ Export failed.",
+            });
+          }
+          return;
+        }
+
+        if (command === "sudo" && isOwner) {
+          let targetJid = null;
+          
+          const mentions = message.message.extendedTextMessage?.contextInfo?.mentionedJid;
+          if (mentions && mentions.length > 0) {
+            targetJid = mentions[0];
+          } else {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quoted) {
+              targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
+            }
+          }
+          
+          if (!targetJid) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Reply or mention a user.",
+            });
+            return;
+          }
+          
+          const normalizedTarget = normalizeJid(targetJid);
+          const targetNumber = targetJid.split("@")[0].split(":")[0];
+          
+          if (isSudoUser(targetJid)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `ℹ️ @${targetNumber} is already a sudo user.`,
+              mentions: [targetJid]
+            });
+            return;
+          }
+          
+          sudoUsers.push(normalizedTarget);
+          saveData();
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `✅ @${targetNumber} is now a sudo user.`,
+            mentions: [targetJid]
+          });
+          logger.info({ target: targetJid }, 'Sudo user added');
+          return;
+        }
+
+        if (command === "delsudo" && isOwner) {
+          let targetJid = null;
+          
+          const mentions = message.message.extendedTextMessage?.contextInfo?.mentionedJid;
+          if (mentions && mentions.length > 0) {
+            targetJid = mentions[0];
+          } else {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quoted) {
+              targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
+            }
+          }
+          
+          if (!targetJid) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Reply or mention a user.",
+            });
+            return;
+          }
+          
+          const targetNumber = targetJid.split("@")[0].split(":")[0];
+          
+          if (!isSudoUser(targetJid)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `ℹ️ @${targetNumber} is not a sudo user.`,
+              mentions: [targetJid]
+            });
+            return;
+          }
+          
+          // Remove from sudoUsers
+          const index = sudoUsers.findIndex(sudo => {
+            let sudoNumber = sudo.split("@")[0].split(":")[0];
+            return sudoNumber === targetNumber;
+          });
+          
+          if (index > -1) {
+            sudoUsers.splice(index, 1);
+            saveData();
+          }
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `✅ @${targetNumber} removed from sudo users.`,
+            mentions: [targetJid]
+          });
+          logger.info({ target: targetJid }, 'Sudo user removed');
+          return;
+        }
+
+        if (command === "listsudo" && isOwner) {
+          if (sudoUsers.length === 0) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "ℹ️ No sudo users.",
+            });
+            return;
+          }
+          
+          let sudoList = "Sudo Users:\n\n";
+          const mentions = [];
+          
+          for (const sudo of sudoUsers) {
+            const number = sudo.split("@")[0];
+            sudoList += `• @${number}\n`;
+            mentions.push(sudo);
+          }
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            text: sudoList,
+            mentions
+          });
+          return;
+        }
+
+        if (command === "acceptall") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+          
+          if (!ownerIsAdmin) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Bot needs admin.",
+            });
+            return;
+          }
+          
+          try {
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "⏳", key: message.key },
+            });
+            
+            const pendingRequests = await sock.groupRequestParticipantsList(message.key.remoteJid);
+            
+            if (!pendingRequests || pendingRequests.length === 0) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "ℹ️ No pending requests.",
+              });
+              return;
+            }
+            
+            let approved = 0;
+            for (const request of pendingRequests) {
+              try {
+                await sock.groupRequestParticipantsUpdate(message.key.remoteJid, [request.jid], "approve");
+                approved++;
+              } catch (err) {
+                logger.error({ error: err.message, user: request.jid }, 'Failed to approve user');
+              }
+            }
+            
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ Approved ${approved}/${pendingRequests.length} requests.`,
+            });
+            
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "✅", key: message.key },
+            });
+            
+            logger.info({ group: message.key.remoteJid, approved, total: pendingRequests.length }, 'Join requests approved');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Accept all error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Failed: " + err.message,
+            });
+          }
+          return;
+        }
+
+        if (command === "rejectall") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+          
+          if (!ownerIsAdmin) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Bot needs admin.",
+            });
+            return;
+          }
+          
+          try {
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "⏳", key: message.key },
+            });
+            
+            const pendingRequests = await sock.groupRequestParticipantsList(message.key.remoteJid);
+            
+            if (!pendingRequests || pendingRequests.length === 0) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "ℹ️ No pending requests.",
+              });
+              return;
+            }
+            
+            let rejected = 0;
+            for (const request of pendingRequests) {
+              try {
+                await sock.groupRequestParticipantsUpdate(message.key.remoteJid, [request.jid], "reject");
+                rejected++;
+              } catch (err) {
+                logger.error({ error: err.message, user: request.jid }, 'Failed to reject user');
+              }
+            }
+            
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ Rejected ${rejected}/${pendingRequests.length} requests.`,
+            });
+            
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "✅", key: message.key },
+            });
+            
+            logger.info({ group: message.key.remoteJid, rejected, total: pendingRequests.length }, 'Join requests rejected');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Reject all error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Failed: " + err.message,
+            });
+          }
+          return;
+        }
+
+        if (command === "left") {
+          try {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "Goodbye!",
+            });
+            await sock.groupLeave(message.key.remoteJid);
+            logger.info({ group: message.key.remoteJid }, 'Bot left group');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Leave group error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Failed to leave.",
             });
           }
           return;
         }
 
         if (text && text.startsWith(".")) {
-          // Better error message for unknown commands in groups
-          const groupOnlyCommands = ['lock', 'open', 'kick', 'warn', 'promote', 'demote', 'antilink', 'tagall', 'hidetag', 'anonymous', 'end', 'setwelcome', 'resetwelcome', 'delete'];
-          const ownerOnlyCommands = ['vcf', 'public', 'private', 'join'];
-
-          let errorMsg = `❌ *Unknown Command!*\n\n`;
-
-          if (ownerOnlyCommands.includes(command)) {
-            errorMsg += `🔐 *Owner Only:* This command can only be used by the bot owner.\n\n`;
-          } else if (!isAdmin && !isOwner && (isAdmin !== undefined)) {
-            errorMsg += `⚠️ *Admin Required:* You need to be a group admin to use this command.\n\n`;
-          } else if (!canUseBot) {
-            errorMsg += `🔒 *Bot Mode:* Bot is in ${botMode} mode. `;
-            if (botMode === 'private') {
-              errorMsg += `Only the owner can use commands.\n\n`;
-            }
-          } else {
-            errorMsg += `The command *${fullCommand}* doesn't exist.\n\n`;
-          }
-
-          errorMsg += `📋 Type *.menu* to see all available commands.`;
-
+          // Unknown command error
           await sock.sendMessage(message.key.remoteJid, {
-            text: errorMsg,
+            text: `❌ Unknown command. Type .menu for help.`,
           });
           return;
         }
 
       } else {
-        // DM mode: isOwner was already determined above
-        const canUseDM = isOwner || botMode === "public";
+        // DM mode: isOwner/isSudo was already determined above
+        const canUseDM = canUseAsOwner || botMode === "public";
 
         logger.info({
           isOwner,
+          isSudo,
           canUseDM,
           botMode,
           sender,
@@ -2143,15 +4193,30 @@ Thank you for participating! 🎭`,
         }, 'DM mode check');
 
         if (command === "menu") {
+          const channelInfo = {
+            contextInfo: {
+              forwardingScore: 999,
+              isForwarded: true,
+              forwardedNewsletterMessageInfo: {
+                newsletterJid: '120363407155737368@newsletter',
+                newsletterName: 'LUCA BOT ✔',
+                serverMessageId: 127
+              }
+            }
+          };
           try {
-            const menuImage = fs.readFileSync("./images/menu-image.jpg");
+            const menuImagePath = path.join(__dirname, 'images/menu-image.jpg');
+            const menuImage = fs.readFileSync(menuImagePath);
             await sock.sendMessage(message.key.remoteJid, {
               image: menuImage,
               caption: getMenu(),
+              ...channelInfo
             });
           } catch (err) {
+            logger.debug({ error: err.message }, 'Menu image not found, sending text only');
             await sock.sendMessage(message.key.remoteJid, {
               text: getMenu(),
+              ...channelInfo
             });
           }
           return;
@@ -2159,39 +4224,80 @@ Thank you for participating! 🎭`,
 
         if (command === "help") {
           await sock.sendMessage(message.key.remoteJid, {
-            text: `ℹ️ *BOT INFORMATION*
+            text: `╭───────────────────╮
+│    *LUCA BOT*     │
+╰───────────────────╯
 
-🤖 KAIDO Bot
-Built by: Everybody Hates James
-Version: 2.0
+👤 *Built by:* The Idle Developer
+📌 *Version:* 1.0
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+┌─────── *FEATURES* ───────┐
+│                          │
+│ • Group Management       │
+│ • Hidden/Visible Tags    │
+│ • View-Once Saver        │
+│ • Profile Pic Extractor  │
+│ • Sticker Commands       │
+│ • Anti-Link System       │
+│ • Warning System         │
+│ • Crypto Prices          │
+│ • TikTok/FB Downloader   │
+│ • Anonymous Messages     │
+│ • Fun Games (RTW, WCG)   │
+│                          │
+└──────────────────────────┘
 
-📋 *Features:*
-• Group management (lock/unlock/kick)
-• Member tagging (hidden & visible)
-• View-once media saving
-• Profile picture extraction
-• Custom sticker commands
-• Auto-link moderation
-• Warning system (2 strikes = kick)
-• Live crypto prices
-• Public/Private mode
+┌────── *HOW TO USE* ──────┐
+│                          │
+│ 1. Type .menu for cmds   │
+│ 2. Reply to use actions  │
+│ 3. Stickers = quick cmds │
+│ 4. .public / .private    │
+│                          │
+└──────────────────────────┘
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *Current Mode:* ${botMode.toUpperCase()}
 
-💡 *How to Use:*
-1. Type .menu for all commands
-2. Reply to messages for actions
-3. Use stickers for quick commands
-4. .public/.private to toggle mode
+_Use responsibly!_`,
+          });
+          return;
+        }
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // 400Q Game (DM Only)
+        if (command === "400q") {
+          // Check if game already active
+          if (q400Games.has(message.key.remoteJid)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "400Q already active!\nType .end to stop it.",
+            });
+            return;
+          }
 
-Current Mode: ${botMode.toUpperCase()}
+          // Create new game
+          const game = create400QGame(message.key.remoteJid);
+          
+          const sentMsg = await sock.sendMessage(message.key.remoteJid, {
+            text: `╭─────────────────╮
+│    🎯 *400Q*    │
+├─────────────────┤
+│ Game Started!
+├─────────────────┤
+│ *Player 1:*
+│ Pick a number 1-400
+│
+│ _(Reply to this msg)_
+╰─────────────────╯`
+          });
+          
+          game.lastBotMessageId = sentMsg.key.id;
+          return;
+        }
 
-⚠️ *Important:*
-Use responsibly!`,
+        // End 400Q game in DM
+        if (command === "end" && q400Games.has(message.key.remoteJid)) {
+          end400QGame(message.key.remoteJid);
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `400Q ended!`
           });
           return;
         }
@@ -2199,21 +4305,149 @@ Use responsibly!`,
         if (command === "ping") {
           const now = Date.now();
           await sock.sendMessage(message.key.remoteJid, {
-            text: `📊 *PONG!*\n✅ Bot is online and responding\n⚡ Latency: ${Date.now() - now}ms\n🔧 Mode: ${botMode.toUpperCase()}`,
+            text: `PONG!\nBot is online and responding\nLatency: ${Date.now() - now}ms\nMode: ${botMode.toUpperCase()}`,
           });
+          return;
+        }
+
+        // ============================================
+        // Anti-Delete Command (DM - Owner Only)
+        // ============================================
+        if (command === "antidel" && canUseDM) {
+          const option = args[0]?.toLowerCase();
+          
+          if (option === "on") {
+            antiDeleteEnabled = true;
+            saveData();
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ *Anti-Delete Enabled*\n\nDeleted messages will be sent to your DM.`,
+            });
+          } else if (option === "off") {
+            antiDeleteEnabled = false;
+            messageCache.clear();
+            saveData();
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ *Anti-Delete Disabled*`,
+            });
+          } else {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `*Anti-Delete Status:* ${antiDeleteEnabled ? 'ON ✅' : 'OFF ❌'}\n\n*Usage:*\n.antidel on - Enable\n.antidel off - Disable\n\n_Deleted messages from groups & DMs will be sent to your DM._`,
+            });
+          }
+          return;
+        }
+
+        // ============================================
+        // Back Command (Return from AFK)
+        // ============================================
+        if (command === "back") {
+          if (!afkUsers[sender]) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ You're not AFK!`,
+            });
+            return;
+          }
+          
+          const afkData = afkUsers[sender];
+          const duration = Math.floor((Date.now() - afkData.time) / 60000);
+          delete afkUsers[sender];
+          saveData();
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `🔙 *Welcome back!*\n\n⏱️ You were AFK for ${duration} minute${duration !== 1 ? 's' : ''}.`,
+          });
+          return;
+        }
+
+        // ============================================
+        // Translate Command
+        // ============================================
+        if (command === "tr" || command === "translate") {
+          let textToTranslate = '';
+          let targetLang = 'en';
+          
+          // Check if replying to a message
+          const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+          if (quotedMsg) {
+            textToTranslate = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
+            targetLang = args[0] || 'en';
+          } else {
+            // Format: .tr [lang] [text] or .tr [text] (defaults to English)
+            if (args.length === 0) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: `🌐 *Translate Command*\n\n*Usage:*\n• .tr [lang] [text]\n• Reply to message with .tr [lang]\n\n*Languages:*\nen, es, fr, de, it, pt, ru, ar, zh, ja, ko, hi, tr, nl, pl, sv, vi, th, id, ms\n\n*Example:*\n.tr es Hello world\n.tr fr How are you?`,
+              });
+              return;
+            }
+            
+            // Check if first arg is a language code (2 letters)
+            const langCodes = ['en', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'ar', 'zh', 'ja', 'ko', 'hi', 'tr', 'nl', 'pl', 'sv', 'vi', 'th', 'id', 'ms', 'bn', 'uk', 'cs', 'el', 'he', 'hu', 'ro', 'fi', 'da', 'no'];
+            
+            if (args[0] && langCodes.includes(args[0].toLowerCase())) {
+              targetLang = args[0].toLowerCase();
+              textToTranslate = args.slice(1).join(' ');
+            } else {
+              // No lang specified, default to English
+              textToTranslate = args.join(' ');
+            }
+          }
+          
+          if (!textToTranslate.trim()) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ No text to translate!`,
+            });
+            return;
+          }
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            react: { text: "🌐", key: message.key },
+          });
+          
+          try {
+            // Try Google Translate API (free unofficial endpoint)
+            const googleUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(textToTranslate)}`;
+            
+            const response = await axios.get(googleUrl, {
+              timeout: 10000,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              }
+            });
+            
+            if (response.data && response.data[0]) {
+              // Extract translated text from response
+              let translated = '';
+              for (const part of response.data[0]) {
+                if (part[0]) translated += part[0];
+              }
+              
+              const detectedLang = response.data[2] || 'auto';
+              
+              await sock.sendMessage(message.key.remoteJid, {
+                text: `🌐 *Translation*\n\n📝 *Original (${detectedLang.toUpperCase()}):*\n${textToTranslate}\n\n✅ *Translated (${targetLang.toUpperCase()}):*\n${translated}`,
+              });
+            } else {
+              throw new Error('Translation failed');
+            }
+          } catch (error) {
+            logger.error({ error: error.message }, 'Translation error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ Translation failed. Try again later.`,
+            });
+          }
           return;
         }
 
         if (command === "public") {
           if (!isOwner) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only the bot owner can change bot mode!",
+              text: "❌ Owner only.",
             });
             return;
           }
           botMode = "public";
           await sock.sendMessage(message.key.remoteJid, {
-            text: "✅ Bot is now *PUBLIC*\n\nAll users can now use bot commands!",
+            text: "✅ Bot set to public.",
           });
           logger.info('Bot mode changed to PUBLIC');
           return;
@@ -2222,13 +4456,13 @@ Use responsibly!`,
         if (command === "private") {
           if (!isOwner) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Only the bot owner can change bot mode!",
+              text: "❌ Owner only.",
             });
             return;
           }
           botMode = "private";
           await sock.sendMessage(message.key.remoteJid, {
-            text: "🔐 Bot is now *PRIVATE*\n\nOnly the owner can use bot commands!",
+            text: "🔒 Bot set to private.",
           });
           logger.info('Bot mode changed to PRIVATE');
           return;
@@ -2295,7 +4529,7 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
 💎 Market Cap: $${marketCap}
 
 ⏰ Updated: ${new Date().toLocaleTimeString()}
-📡 Source: CoinGecko`,
+💡 Source: CoinGecko`,
           });
 
           await sock.sendMessage(message.key.remoteJid, {
@@ -2309,7 +4543,7 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Usage Error:*\n\nReply to a view-once photo or video with the command *.vv* to save it.",
+                text: "❌ Reply to a view-once message.",
               });
               return;
             }
@@ -2317,7 +4551,7 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             const viewOnceMsg = await extractViewOnceMedia(quoted);
             if (!viewOnceMsg) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Invalid Message:*\n\nThe message you replied to is not a view-once photo or video. Please check and try again.",
+                text: "❌ Not a view-once message.",
               });
               return;
             }
@@ -2329,14 +4563,14 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             const media = await downloadViewOnceMedia(viewOnceMsg);
             if (!media || !media.mediaData) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ *Download Failed:*\n\nCould not download the view-once media. It might have expired, been deleted, or there was a network issue. Try again immediately.",
+                text: "❌ Download failed. Try again.",
               });
               return;
             }
 
             // Send the media back as a regular message to the current chat
             const sendOptions = {
-              caption: `✅ *LUCA View-Once Saver*\n\nOriginal Caption: ${media.caption || 'None'}`,
+              caption: media.caption || '',
             };
 
             if (media.mediaType === "image") {
@@ -2356,25 +4590,75 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
           } catch (error) {
             logger.error({ error: error.message, stack: error.stack }, 'VV command error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ *System Error:*\n\nAn unexpected error occurred while processing your request. Please report this to the bot owner with the command you used.",
+              text: "❌ Error processing view-once.",
             });
           }
           return;
         }
-          if (command === "sticker" && canUseDM) {
+
+        // ============================================
+        // Take Sticker Command (DM)
+        // ============================================
+        if (command === "take" && canUseDM) {
+          try {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted?.stickerMessage) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Reply to a sticker.",
+              });
+              return;
+            }
+            
+            // Download the sticker
+            const stream = await downloadContentFromMessage(quoted.stickerMessage, 'sticker');
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+              buffer = Buffer.concat([buffer, chunk]);
+            }
+            
+            // Send back as sticker
+            await sock.sendMessage(message.key.remoteJid, {
+              sticker: buffer,
+            });
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "✅", key: message.key },
+            });
+
+            setTimeout(async () => {
+              try {
+                await sock.sendMessage(message.key.remoteJid, {
+                  react: { text: "", key: message.key },
+                });
+              } catch (err) {}
+            }, 1000);
+
+            logger.info('Sticker taken (DM) successfully');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Take sticker DM error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Failed to take sticker.",
+            });
+          }
+          return;
+        }
+
+        if (command === "sticker" && canUseDM) {
           try {
             const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to an image with *.sticker*",
+                text: "❌ Reply to an image or video.",
               });
               return;
             }
 
             const imageMsg = quoted?.imageMessage;
-            if (!imageMsg) {
+            const videoMsg = quoted?.videoMessage;
+            
+            if (!imageMsg && !videoMsg) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to an image only!",
+                text: "❌ Image or video only.",
               });
               return;
             }
@@ -2383,16 +4667,30 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
               react: { text: "⏳", key: message.key },
             });
 
-            const stream = await downloadContentFromMessage(imageMsg, 'image');
-            let buffer = Buffer.from([]);
-            for await (const chunk of stream) {
-              buffer = Buffer.concat([buffer, chunk]);
+            // Get custom sticker name from args
+            const stickerName = args.join(' ').trim() || 'LUCA Bot';
+
+            let stickerBuffer;
+            
+            if (imageMsg) {
+              const stream = await downloadContentFromMessage(imageMsg, 'image');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              stickerBuffer = await convertToSticker(buffer);
+            } else if (videoMsg) {
+              const stream = await downloadContentFromMessage(videoMsg, 'video');
+              let buffer = Buffer.from([]);
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              stickerBuffer = await convertVideoToSticker(buffer);
             }
 
-            const stickerBuffer = await convertToSticker(buffer);
             if (!stickerBuffer) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Failed to convert image to sticker",
+                text: "❌ Failed to create sticker.",
               });
               return;
             }
@@ -2407,14 +4705,150 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
           } catch (err) {
             logger.error({ error: err.message }, 'Sticker DM error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to create sticker: " + err.message,
+              text: "❌ Failed to create sticker.",
             });
           }
           return;
         }
 
-        if (message.message.stickerMessage && !text && canUseDM) {
-          const stickerHash = message.message.stickerMessage.fileSha256?.toString('base64');
+        if (command === "play" && canUseDM) {
+          await playSongCommand(sock, message, args, logger);
+          return;
+        }
+
+        // ============================================
+        // TikTok Video Downloader (DM)
+        // ============================================
+        if ((command === "tt" || command === "tiktok") && canUseDM) {
+          let tiktokUrl = args.join(' ').trim();
+          
+          // Check if replying to a message with a TikTok URL
+          if (!tiktokUrl) {
+            const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quotedMsg) {
+              const quotedText = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
+              const urlMatch = quotedText.match(/https?:\/\/(www\.)?(tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com)[^\s]*/i);
+              if (urlMatch) {
+                tiktokUrl = urlMatch[0];
+              }
+            }
+          }
+          
+          if (!tiktokUrl || !tiktokUrl.match(/tiktok\.com/i)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ *Usage:* .tt [tiktok url]\n\nOr reply to a TikTok link with .tt`,
+            });
+            return;
+          }
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            react: { text: "⏳", key: message.key },
+          });
+          
+          try {
+            const apiUrl = `https://apis.davidcyriltech.my.id/download/tiktokv4?url=${encodeURIComponent(tiktokUrl)}`;
+            const response = await axios.get(apiUrl, { timeout: 30000 });
+            
+            if (response.data && response.data.success && response.data.results) {
+              const results = response.data.results;
+              const videoUrl = results.no_watermark || results.watermark;
+              
+              if (videoUrl) {
+                await sock.sendMessage(message.key.remoteJid, {
+                  react: { text: "✅", key: message.key },
+                });
+                
+                await sock.sendMessage(message.key.remoteJid, {
+                  video: { url: videoUrl },
+                  caption: `🎵 *TikTok Download*`,
+                });
+              } else {
+                throw new Error('No video URL found');
+              }
+            } else {
+              throw new Error(response.data?.message || 'API error');
+            }
+          } catch (error) {
+            logger.error({ error: error.message }, 'TikTok download error (DM)');
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "❌", key: message.key },
+            });
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ Failed to download TikTok video.\n\n_Try again or check if the URL is valid._`,
+            });
+          }
+          return;
+        }
+
+        // ============================================
+        // Facebook Video Downloader (DM)
+        // ============================================
+        if ((command === "fb" || command === "facebook") && canUseDM) {
+          let fbUrl = args.join(' ').trim();
+          
+          // Check if replying to a message with a Facebook URL
+          if (!fbUrl) {
+            const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quotedMsg) {
+              const quotedText = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
+              const urlMatch = quotedText.match(/https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)[^\s]*/i);
+              if (urlMatch) {
+                fbUrl = urlMatch[0];
+              }
+            }
+          }
+          
+          if (!fbUrl || !fbUrl.match(/(facebook\.com|fb\.watch|fb\.com)/i)) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ *Usage:* .fb [facebook url]\n\nOr reply to a Facebook video link with .fb`,
+            });
+            return;
+          }
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            react: { text: "⏳", key: message.key },
+          });
+          
+          try {
+            const apiUrl = `https://apis.davidcyriltech.my.id/facebook3?url=${encodeURIComponent(fbUrl)}&apikey=`;
+            const response = await axios.get(apiUrl, { timeout: 30000 });
+            
+            if (response.data && response.data.success && response.data.result) {
+              const result = response.data.result;
+              const videoUrl = result.hd || result.sd || result.Normal_video;
+              
+              if (videoUrl) {
+                await sock.sendMessage(message.key.remoteJid, {
+                  react: { text: "✅", key: message.key },
+                });
+                
+                await sock.sendMessage(message.key.remoteJid, {
+                  video: { url: videoUrl },
+                  caption: `📘 *Facebook Download*`,
+                });
+              } else {
+                throw new Error('No video URL found');
+              }
+            } else {
+              throw new Error(response.data?.message || 'API error');
+            }
+          } catch (error) {
+            logger.error({ error: error.message }, 'Facebook download error (DM)');
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "❌", key: message.key },
+            });
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ Failed to download Facebook video.\n\n_Try again or check if the URL is valid._`,
+            });
+          }
+          return;
+        }
+
+        // STICKER COMMAND DETECTION (DM) - Use canUseAsOwner OR canUseDM OR fromMe
+        const canUseStickerDM = canUseAsOwner || canUseDM || message.key.fromMe;
+        
+        if (message.message.stickerMessage && !text && canUseStickerDM) {
+          const stickerHash = message.message.stickerMessage.fileSha256 ? Buffer.from(message.message.stickerMessage.fileSha256).toString('base64') : null;
 
           for (const [cmdName, hash] of Object.entries(stickerCommands)) {
             if (hash === stickerHash || hash === true || (typeof hash === 'object' && hash.hash === stickerHash)) {
@@ -2495,19 +4929,19 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
 
           if (!sticker || !cmdName) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Usage: Reply to a sticker with *.setsticker [command]*\n\nSupported commands: kick, open, lock, vv, hidetag, pp, sticker",
+              text: "❌ Reply to a sticker with .setsticker [command]",
             });
             return;
           }
 
           if (!["kick", "open", "lock", "vv", "hidetag", "pp", "sticker"].includes(cmdName)) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Supported commands: kick, open, lock, vv, hidetag, pp, sticker",
+              text: "❌ Commands: kick, open, lock, vv, hidetag, pp, sticker",
             });
             return;
           }
 
-          const stickerHash = sticker.fileSha256?.toString('base64');
+          const stickerHash = sticker.fileSha256 ? Buffer.from(sticker.fileSha256).toString('base64') : null;
 
           if (cmdName === "sticker") {
             stickerCommands[cmdName] = { type: "sticker_converter", hash: stickerHash };
@@ -2516,7 +4950,7 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
           }
 
           await sock.sendMessage(message.key.remoteJid, {
-            text: `✅ Sticker set to *${cmdName.toUpperCase()}* - works globally!`,
+            text: `✅ Sticker set to *${cmdName.toUpperCase()}*.`,
           });
           logger.info({ command: cmdName }, 'Sticker command set from DM');
           return;
@@ -2580,7 +5014,7 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
             if (!quoted) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to a message to delete it",
+                text: "❌ Reply to a message.",
               });
               return;
             }
@@ -2597,36 +5031,16 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
           } catch (err) {
             logger.error({ error: err.message }, 'Delete DM error');
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to delete message",
+              text: "❌ Failed to delete.",
             });
           }
           return;
         }
 
         if (text && text.startsWith(".")) {
-          // Better error message for unknown commands in DMs
-          const groupOnlyCommands = ['lock', 'open', 'kick', 'warn', 'promote', 'demote', 'antilink', 'tagall', 'hidetag', 'anonymous', 'end', 'setwelcome', 'resetwelcome', 'vcf'];
-          const ownerOnlyCommands = ['public', 'private', 'join'];
-
-          let errorMsg = `❌ *Command Error!*\n\n`;
-
-          if (groupOnlyCommands.includes(command)) {
-            errorMsg += `👥 *Group Only:* The command *${fullCommand}* can only be used in groups, not in DMs.\n\n`;
-          } else if (ownerOnlyCommands.includes(command) && !isOwner) {
-            errorMsg += `🔐 *Owner Only:* This command can only be used by the bot owner.\n\n`;
-          } else if (!canUseDM) {
-            errorMsg += `🔒 *Bot Mode:* Bot is in ${botMode} mode. `;
-            if (botMode === 'private') {
-              errorMsg += `Only the owner can use commands in DMs.\n\n`;
-            }
-          } else {
-            errorMsg += `The command *${fullCommand}* doesn't exist or isn't available in DMs.\n\n`;
-          }
-
-          errorMsg += `📋 Type *.menu* to see all available commands.`;
-
+          // Unknown command error
           await sock.sendMessage(message.key.remoteJid, {
-            text: errorMsg,
+            text: `❌ Unknown command. Type .menu for help.`,
           });
           return;
         }
@@ -2637,11 +5051,63 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
   });
 }
 
+// Play music command function
+async function playSongCommand(sock, message, args, logger) {
+  if (!args || args.length < 1) {
+    await sock.sendMessage(message.key.remoteJid, {
+      text: "❌ Usage: .play [song name]",
+    });
+    return;
+  }
+
+  const query = args.join(' ');
+
+  await sock.sendMessage(message.key.remoteJid, {
+    react: { text: "⏳", key: message.key },
+  });
+
+  try {
+    const apiUrl = 'https://apis.davidcyriltech.my.id/song?query=' + encodeURIComponent(query) + '&apikey=';
+    const response = await axios.get(apiUrl);
+    const data = response.data;
+
+    if (!data.status || !data.result) {
+      await sock.sendMessage(message.key.remoteJid, {
+        text: "❌ Song not found.",
+      });
+      return;
+    }
+
+    const song = data.result;
+    const audioUrl = song.audio.download_url;
+
+    // Download and send audio
+    const audioResponse = await axios.get(audioUrl, { responseType: 'arraybuffer' });
+    const audioBuffer = Buffer.from(audioResponse.data);
+
+    await sock.sendMessage(message.key.remoteJid, {
+      audio: audioBuffer,
+      mimetype: 'audio/mpeg',
+      ptt: false
+    });
+
+    await sock.sendMessage(message.key.remoteJid, {
+      react: { text: "✅", key: message.key },
+    });
+
+    logger.info({ song: song.title, query: query }, 'Song played successfully');
+
+  } catch (error) {
+    logger.error({ error: error.message }, 'Play command error');
+    await sock.sendMessage(message.key.remoteJid, {
+      text: "❌ Download failed.",
+    });
+  }
+}
+
 console.clear();
-console.log("╔════════════════════════════════╗");
-console.log("║   ⚔️ KAIDO BOT v2.0 ⚔️          ║");
-console.log("║   Starting...                  ║");
-console.log("╚════════════════════════════════╝\n");
+console.log("   ⚔️ KAIDO BOT v2.0 ⚔️          ");
+console.log("   Starting...                  ");
 
 startBot().catch((err) => {
   logger.error({ error: err.message, stack: err.stack }, 'Bot startup error');
@@ -2661,3 +5127,4 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (reason, promise) => {
   logger.error({ reason }, 'Unhandled rejection');
 });
+
