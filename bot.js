@@ -1397,7 +1397,7 @@ const getMenu = () => `
   ◻ *.rejectall* - Reject joins
 
  ━━━ *CHAT* ━━━
- ◯ *.antilink* on/off
+ ◯ *.antilink* kick/warn/off
  ◯ *.antiphoto* kick/warn/off
  ◯ *.antistatus* kick/warn/off
  ◯ *.antitag* kick/warn/off
@@ -2081,7 +2081,7 @@ We hope to see you again soon!`;
             }
           }
           return;
-        } else {
+        } else if (!isGroup) {
           return;
         }
       }
@@ -2089,8 +2089,8 @@ We hope to see you again soon!`;
       const command = fullCommand?.startsWith(".") ? fullCommand.slice(1) : (fullCommand || "");
       const args = text?.trim().split(" ").slice(1) || [];
 
-      // Ignore single dot or empty command - BUT allow sticker messages through
-      if ((command === "" || command === ".") && !hasStickerMessage) return;
+      // Ignore single dot or empty command - BUT allow sticker messages and group messages through (for anti-* enforcement)
+      if ((command === "" || command === ".") && !hasStickerMessage && !isGroup) return;
 
       // Handle WCG game messages (Join and word submissions)
       if (isGroup && wcgGames.has(message.key.remoteJid)) {
@@ -2219,60 +2219,72 @@ We hope to see you again soon!`;
         // }, 'OWNER ADMIN CHECK');
 
         const settings = adminSettings[message.key.remoteJid];
-        if (settings?.antilink && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
+        const antilinkMode = settings?.antilink; // 'kick', 'warn', or false/undefined
+        if (antilinkMode && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
           if (isLinkMessage(text)) {
-            logger.info({ sender, group: message.key.remoteJid }, 'Link detected - taking action');
+            const groupId = message.key.remoteJid;
+            const userNumber = sender.split("@")[0];
+            logger.info({ sender, group: groupId, mode: antilinkMode }, 'Link detected - taking action');
 
-            // Delete the link message
+            // Delete the link message first
             try {
-              await sock.sendMessage(message.key.remoteJid, {
-                delete: message.key
-              });
+              await sock.sendMessage(groupId, { delete: message.key });
               logger.info('Link message deleted');
             } catch (err) {
               logger.error({ error: err.message }, 'Failed to delete link message');
             }
 
-            // Add warning to user
-            const groupId = message.key.remoteJid;
-            if (!userWarns[groupId]) userWarns[groupId] = {};
-            if (!userWarns[groupId][sender]) userWarns[groupId][sender] = 0;
-
-            userWarns[groupId][sender]++;
-            const warnCount = userWarns[groupId][sender];
-            saveData(); // Persist warnings
-
-            const userNumber = sender.split("@")[0];
-
-            // Check if user has 3 warnings
-            if (warnCount >= 3) {
-              // Try to kick user
+            if (antilinkMode === 'kick') {
+              // Kick immediately
               try {
                 await sock.groupParticipantsUpdate(groupId, [sender], "remove");
                 await sock.sendMessage(groupId, {
-                  text: `@${userNumber} removed (3 link warnings).`,
+                  text: `@${userNumber} has been removed for sending a link.`,
                   mentions: [sender]
                 });
-                delete userWarns[groupId][sender];
-                saveData(); // Save after removing warn count
-                logger.info({ sender }, 'User kicked for sending link (3 warnings)');
+                logger.info({ sender }, 'User kicked for sending link');
               } catch (err) {
                 logger.error({ error: err.message }, 'Failed to kick user');
                 await sock.sendMessage(groupId, {
-                  text: `@${userNumber} has 3 warnings. Could not remove - bot needs admin.`,
+                  text: `@${userNumber} sent a link. Could not remove - bot needs admin.`,
                   mentions: [sender]
                 });
               }
             } else {
-              // Warning
-              await sock.sendMessage(groupId, {
-                text: `⚠️ Warning ${warnCount}/3 @${userNumber} - No links allowed.`,
-                mentions: [sender]
-              });
+              // Warn mode (handles 'warn' and legacy true value)
+              if (!userWarns[groupId]) userWarns[groupId] = {};
+              if (!userWarns[groupId][sender]) userWarns[groupId][sender] = 0;
+              userWarns[groupId][sender]++;
+              const warnCount = userWarns[groupId][sender];
+              saveData();
+
+              if (warnCount >= 3) {
+                try {
+                  await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                  await sock.sendMessage(groupId, {
+                    text: `@${userNumber} removed (3 link warnings).`,
+                    mentions: [sender]
+                  });
+                  delete userWarns[groupId][sender];
+                  saveData();
+                  logger.info({ sender }, 'User kicked for sending link (3 warnings)');
+                } catch (err) {
+                  logger.error({ error: err.message }, 'Failed to kick user');
+                  await sock.sendMessage(groupId, {
+                    text: `@${userNumber} has 3 warnings. Could not remove - bot needs admin.`,
+                    mentions: [sender]
+                  });
+                }
+              } else {
+                await sock.sendMessage(groupId, {
+                  text: `⚠️ Warning ${warnCount}/3 @${userNumber} - No links allowed.`,
+                  mentions: [sender]
+                });
+              }
             }
             return;
-  }
-  }
+          }
+        }
 
         // ============================================
         // Anti-Photo Enforcement (delete images/videos that are not view-once)
@@ -2463,6 +2475,9 @@ We hope to see you again soon!`;
         }
 
         const canUseBot = canUseAsOwner || (botMode === "public");
+
+        // Non-command group messages should return after anti-* enforcement
+        if (!text || !text.startsWith('.')) return;
 
         // Silent return for non-authorized users in private mode
         // Allow ONLY owner/sudo to use commands when in private mode
@@ -3893,9 +3908,9 @@ if (command === "vv" && canUseBot) {
 
           const action = args[0]?.toLowerCase();
 
-          if (!action || (action !== "on" && action !== "off")) {
+          if (!action || !['kick', 'warn', 'off'].includes(action)) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Usage: .antilink on/off\n\nExample:\n.antilink on - Enable link protection\n.antilink off - Disable link protection",
+              text: "❌ Usage: .antilink kick/warn/off\n\n*.antilink kick* - Kick users who send links\n*.antilink warn* - Warn users (3 warnings = kick)\n*.antilink off* - Disable link protection",
             });
             return;
           }
@@ -3904,14 +3919,20 @@ if (command === "vv" && canUseBot) {
             adminSettings[message.key.remoteJid] = {};
           }
 
-          const isOn = action === "on";
-          adminSettings[message.key.remoteJid].antilink = isOn;
-          saveData(); // Persist to JSON
-
-          await sock.sendMessage(message.key.remoteJid, {
-            text: isOn ? "Antilink enabled." : "Antilink disabled.",
-          });
-          logger.info({ group: message.key.remoteJid, enabled: isOn }, 'Antilink toggled');
+          if (action === 'off') {
+            adminSettings[message.key.remoteJid].antilink = false;
+            saveData();
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "✅ Antilink disabled.",
+            });
+          } else {
+            adminSettings[message.key.remoteJid].antilink = action;
+            saveData();
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ Antilink set to *${action}* mode.`,
+            });
+          }
+          logger.info({ group: message.key.remoteJid, mode: action }, 'Antilink toggled');
           return;
         }
 
