@@ -1402,10 +1402,11 @@ const getMenu = () => `
 ◌ *.tr* [lang] - Translate
 ◌ *.afk* [reason] - Set AFK
 ◌ *.back* - Return from AFK
+◌ *.toimg* - Sticker to image
+◌ *.tomp3* - Video/audio to MP3
 
 ━━━ *DOWNLOADERS* ━━━
 ◯ *.tt* [url] - TikTok video
-◯ *.fb* [url] - Facebook video
 
 ━━━ *CRYPTO* ━━━
 ⨷ *.live* [coin]
@@ -1608,17 +1609,78 @@ Ready to manage!`,
             const groupDesc = groupMeta.desc || 'No description';
             const memberCount = groupMeta.participants?.length || 0;
 
+            // Check for image placeholders
+            const hasGrpPP = customWelcomeMessages[groupJid].includes('{grppp}');
+            const hasUserPP = customWelcomeMessages[groupJid].includes('{userpp}');
+
             // Replace all placeholders
             welcomeMessage = customWelcomeMessages[groupJid]
               .replace(/{user}/g, `@${username}`)
               .replace(/{username}/g, username)
               .replace(/{groupname}/g, groupName)
               .replace(/{desc}/g, groupDesc)
-              .replace(/{membercount}/g, memberCount.toString());
+              .replace(/{membercount}/g, memberCount.toString())
+              .replace(/{grppp}/g, '')
+              .replace(/{userpp}/g, '')
+              .trim();
+
+            // If image placeholder is used, fetch the profile picture and send as image
+            let ppUrl = null;
+            if (hasUserPP) {
+              try {
+                ppUrl = await sock.profilePictureUrl(participantJid, 'image');
+              } catch (e) {
+                try {
+                  ppUrl = await sock.profilePictureUrl(participantJid, 'display');
+                } catch (e2) {
+                  ppUrl = null;
+                }
+              }
+            } else if (hasGrpPP) {
+              try {
+                ppUrl = await sock.profilePictureUrl(groupJid, 'image');
+              } catch (e) {
+                try {
+                  ppUrl = await sock.profilePictureUrl(groupJid, 'display');
+                } catch (e2) {
+                  ppUrl = null;
+                }
+              }
+            }
+
+            if (ppUrl && (hasGrpPP || hasUserPP)) {
+              // Send as image with caption
+              try {
+                const ppResponse = await axios.get(ppUrl, { responseType: 'arraybuffer', timeout: 10000 });
+                const ppBuffer = Buffer.from(ppResponse.data);
+                await sock.sendMessage(groupJid, {
+                  image: ppBuffer,
+                  caption: welcomeMessage,
+                  mentions: [participantJid]
+                });
+              } catch (ppErr) {
+                // Fallback to text if image download fails
+                logger.error({ error: ppErr.message }, 'Failed to fetch profile pic for welcome');
+                await sock.sendMessage(groupJid, {
+                  text: welcomeMessage,
+                  mentions: [participantJid]
+                });
+              }
+            } else {
+              // Send as regular text
+              await sock.sendMessage(groupJid, {
+                text: welcomeMessage,
+                mentions: [participantJid]
+              });
+            }
           } catch (error) {
             // Fallback if metadata fails
-            welcomeMessage = customWelcomeMessages[groupJid].replace(/{user}/g, `@${username}`);
+            welcomeMessage = customWelcomeMessages[groupJid].replace(/{user}/g, `@${username}`).replace(/{grppp}/g, '').replace(/{userpp}/g, '').trim();
             logger.error({ error: error.message }, 'Error getting group metadata for welcome');
+            await sock.sendMessage(groupJid, {
+              text: welcomeMessage,
+              mentions: [participantJid]
+            });
           }
         } else {
           // Default welcome message
@@ -1631,10 +1693,13 @@ Hello @${username}, we're glad to have you here!
 Please read the group rules and enjoy your stay!`;
         }
 
-        await sock.sendMessage(groupJid, {
-          text: welcomeMessage,
-          mentions: [participantJid]
-        });
+        // Only send message here if there was NO custom welcome (custom is handled above with image support)
+        if (!customWelcomeMessages[groupJid]) {
+          await sock.sendMessage(groupJid, {
+            text: welcomeMessage,
+            mentions: [participantJid]
+          });
+        }
       }
     } else if (action === 'remove') {
       // Check if goodbye is enabled for this group (disabled by default)
@@ -2680,6 +2745,146 @@ if (command === "vv" && canUseBot) {
           return;
         }
 
+        // ============================================
+        // AFK Command (Group)
+        // ============================================
+        if (command === "afk" && canUseBot) {
+          const reason = args.join(' ').trim() || 'No reason given';
+          
+          afkUsers[sender] = {
+            reason: reason,
+            time: Date.now()
+          };
+          saveData();
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `\uD83D\uDCA4 *@${sender.split('@')[0]} is now AFK*\n\n\uD83D\uDCDD Reason: ${reason}`,
+            mentions: [sender]
+          });
+          return;
+        }
+
+        // ============================================
+        // Sticker to Image Command (Group)
+        // ============================================
+        if (command === "toimg" && canUseBot) {
+          try {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted?.stickerMessage) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "\u274C Reply to a sticker to convert it to an image.",
+              });
+              return;
+            }
+
+            // Check if it's an animated sticker
+            if (quoted.stickerMessage.isAnimated) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "\u274C Animated stickers are not supported. Only static stickers can be converted.",
+              });
+              return;
+            }
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u23F3", key: message.key },
+            });
+
+            // Download the sticker
+            const stream = await downloadContentFromMessage(quoted.stickerMessage, 'sticker');
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+              buffer = Buffer.concat([buffer, chunk]);
+            }
+
+            // Convert WebP sticker to PNG
+            const imageBuffer = await sharp(buffer).png().toBuffer();
+
+            await sock.sendMessage(message.key.remoteJid, {
+              image: imageBuffer,
+              caption: '\uD83D\uDDBC\uFE0F Sticker converted to image!',
+            });
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u2705", key: message.key },
+            });
+          } catch (err) {
+            logger.error({ error: err.message }, 'ToImg error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "\u274C Failed to convert sticker to image.",
+            });
+          }
+          return;
+        }
+
+        // ============================================
+        // Video/Audio to MP3 Command (Group)
+        // ============================================
+        if (command === "tomp3" && canUseBot) {
+          try {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted?.videoMessage && !quoted?.audioMessage) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "\u274C Reply to a video or audio message to extract audio.",
+              });
+              return;
+            }
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u23F3", key: message.key },
+            });
+
+            let buffer = Buffer.from([]);
+            let mediaType;
+
+            if (quoted.videoMessage) {
+              const stream = await downloadContentFromMessage(quoted.videoMessage, 'video');
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              mediaType = 'video';
+            } else if (quoted.audioMessage) {
+              const stream = await downloadContentFromMessage(quoted.audioMessage, 'audio');
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              mediaType = 'audio';
+            }
+
+            // Use ffmpeg to extract audio as mp3
+            const { execSync } = require('child_process');
+            const tempDir = path.join(__dirname, 'temp');
+            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+            const tempInput = path.join(tempDir, `input_${Date.now()}.${mediaType === 'video' ? 'mp4' : 'ogg'}`);
+            const tempOutput = path.join(tempDir, `output_${Date.now()}.mp3`);
+
+            fs.writeFileSync(tempInput, buffer);
+            execSync(`ffmpeg -i "${tempInput}" -vn -ab 128k -ar 44100 -y "${tempOutput}"`, { stdio: 'pipe' });
+
+            const mp3Buffer = fs.readFileSync(tempOutput);
+
+            // Clean up temp files
+            fs.unlinkSync(tempInput);
+            fs.unlinkSync(tempOutput);
+
+            await sock.sendMessage(message.key.remoteJid, {
+              audio: mp3Buffer,
+              mimetype: 'audio/mpeg',
+              ptt: false,
+            });
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u2705", key: message.key },
+            });
+          } catch (err) {
+            logger.error({ error: err.message }, 'ToMP3 error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "\u274C Failed to convert to MP3. Make sure ffmpeg is installed.",
+            });
+          }
+          return;
+        }
+
         if (command === "play" && canUseBot) {
           await playSongCommand(sock, message, args, logger);
           return;
@@ -2716,12 +2921,15 @@ if (command === "vv" && canUseBot) {
           });
           
           try {
-            const apiUrl = `https://apis.davidcyriltech.my.id/download/tiktokv4?url=${encodeURIComponent(tiktokUrl)}`;
-            const response = await axios.get(apiUrl, { timeout: 30000 });
+            const apiUrl = `https://api.idledeveloper.tech/api/tiktok?url=${encodeURIComponent(tiktokUrl)}`;
+            const response = await axios.get(apiUrl, {
+              timeout: 30000,
+              headers: { 'X-API-Key': 'tiktok_e176b399ccea758d1aa6bbc8d29533dde9fbcd96d827460e' }
+            });
             
-            if (response.data && response.data.success && response.data.results) {
-              const results = response.data.results;
-              const videoUrl = results.no_watermark || results.watermark;
+            if (response.data && response.data.success && response.data.data) {
+              const data = response.data.data;
+              const videoUrl = data.video?.noWatermark || data.video?.hdNoWatermark || data.video?.watermark || data.downloadUrls?.noWatermark;
               
               if (videoUrl) {
                 // Change reaction to success
@@ -2729,10 +2937,18 @@ if (command === "vv" && canUseBot) {
                   react: { text: "✅", key: message.key },
                 });
                 
+                // Build caption with stats
+                let caption = `🎵 *TikTok Download*\n\n`;
+                if (data.author) caption += `👤 *Author:* ${data.author || data.authorUsername || 'Unknown'}\n`;
+                if (data.description) caption += `📝 ${data.description}\n`;
+                if (data.stats) {
+                  caption += `\n❤️ ${data.stats.likes?.toLocaleString() || 0} • 💬 ${data.stats.comments?.toLocaleString() || 0} • 🔄 ${data.stats.shares?.toLocaleString() || 0}`;
+                }
+                
                 // Send the video
                 await sock.sendMessage(message.key.remoteJid, {
                   video: { url: videoUrl },
-                  caption: `🎵 *TikTok Download*`,
+                  caption: caption,
                 });
               } else {
                 throw new Error('No video URL found');
@@ -2747,73 +2963,6 @@ if (command === "vv" && canUseBot) {
             });
             await sock.sendMessage(message.key.remoteJid, {
               text: `❌ Failed to download TikTok video.\n\n_Try again or check if the URL is valid._`,
-            });
-          }
-          return;
-        }
-
-        // ============================================
-        // Facebook Video Downloader
-        // ============================================
-        if ((command === "fb" || command === "facebook") && canUseBot) {
-          let fbUrl = args.join(' ').trim();
-          
-          // Check if replying to a message with a Facebook URL
-          if (!fbUrl) {
-            const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-            if (quotedMsg) {
-              const quotedText = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
-              const urlMatch = quotedText.match(/https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)[^\s]*/i);
-              if (urlMatch) {
-                fbUrl = urlMatch[0];
-              }
-            }
-          }
-          
-          if (!fbUrl || !fbUrl.match(/(facebook\.com|fb\.watch|fb\.com)/i)) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ *Usage:* .fb [facebook url]\n\nOr reply to a Facebook video link with .fb`,
-            });
-            return;
-          }
-          
-          // React with timer while processing
-          await sock.sendMessage(message.key.remoteJid, {
-            react: { text: "⏳", key: message.key },
-          });
-          
-          try {
-            const apiUrl = `https://apis.davidcyriltech.my.id/facebook3?url=${encodeURIComponent(fbUrl)}&apikey=`;
-            const response = await axios.get(apiUrl, { timeout: 30000 });
-            
-            if (response.data && response.data.success && response.data.result) {
-              const result = response.data.result;
-              const videoUrl = result.hd || result.sd || result.video;
-              
-              if (videoUrl) {
-                // Change reaction to success
-                await sock.sendMessage(message.key.remoteJid, {
-                  react: { text: "✅", key: message.key },
-                });
-                
-                // Send the video
-                await sock.sendMessage(message.key.remoteJid, {
-                  video: { url: videoUrl },
-                  caption: `📘 *Facebook Download*\n\n📝 ${result.title || 'Facebook Video'}`,
-                });
-              } else {
-                throw new Error('No video URL found');
-              }
-            } else {
-              throw new Error(response.data?.message || 'API error');
-            }
-          } catch (error) {
-            logger.error({ error: error.message }, 'Facebook download error');
-            await sock.sendMessage(message.key.remoteJid, {
-              react: { text: "❌", key: message.key },
-            });
-            await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ Failed to download Facebook video.\n\n_Try again or check if the URL is valid._`,
             });
           }
           return;
@@ -3516,7 +3665,7 @@ if (command === "vv" && canUseBot) {
 
           if (!welcomeText) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ *Usage:* .setwelcome [message]\n\n📝 *Available Placeholders:*\n• {user} - Mention new member\n• {username} - Member's name\n• {groupname} - Group name\n• {desc} - Group description\n• {membercount} - Total members\n\n*Example:*\n.setwelcome Welcome {user} to {groupname}! We now have {membercount} members! 🎉`,
+              text: `❌ *Usage:* .setwelcome [message]\n\n📝 *Available Placeholders:*\n• {user} - Mention new member\n• {username} - Member's name\n• {groupname} - Group name\n• {desc} - Group description\n• {membercount} - Total members\n• {grppp} - Send with group profile pic\n• {userpp} - Send with new member's profile pic\n\n*Example:*\n.setwelcome {grppp} Welcome {user} to {groupname}! We now have {membercount} members! 🎉\n\n_Note: Use {grppp} or {userpp} anywhere in the message to attach that profile picture to the welcome message._`,
             });
             return;
           }
@@ -3526,7 +3675,7 @@ if (command === "vv" && canUseBot) {
           saveData(); // Persist to JSON
 
           await sock.sendMessage(message.key.remoteJid, {
-            text: `✅ Welcome message set!\n\n_Preview placeholders:_\n• {user} → @mention\n• {username} → username\n• {groupname} → group name\n• {desc} → group description\n• {membercount} → member count`,
+            text: `✅ Welcome message set!\n\n_Preview placeholders:_\n• {user} → @mention\n• {username} → username\n• {groupname} → group name\n• {desc} → group description\n• {membercount} → member count\n• {grppp} → group profile picture\n• {userpp} → new member's profile picture`,
           });
 
           logger.info({
@@ -3576,7 +3725,7 @@ if (command === "vv" && canUseBot) {
           if (!action || (action !== "on" && action !== "off")) {
             const currentStatus = welcomeEnabled[message.key.remoteJid] ? "ON ✅" : "OFF ❌";
             await sock.sendMessage(message.key.remoteJid, {
-              text: `📝 *Welcome Messages*\n\nCurrent status: *${currentStatus}*\n\n*Usage:*\n• .welcome on - Enable welcome messages\n• .welcome off - Disable welcome messages\n• .setwelcome [msg] - Set custom message\n• .resetwelcome - Reset to default message`,
+              text: `📝 *Welcome Messages*\n\nCurrent status: *${currentStatus}*\n\n*Usage:*\n• .welcome on - Enable welcome messages\n• .welcome off - Disable welcome messages\n• .setwelcome [msg] - Set custom message\n• .resetwelcome - Reset to default message\n\n*Image Placeholders:*\n• {grppp} - Attach group profile pic\n• {userpp} - Attach new member's profile pic`,
             });
             return;
           }
@@ -4241,8 +4390,8 @@ Longest Word: "${stats.longestWord.word || 'N/A'}" (${stats.longestWord.length |
 │ • Anti-Link System       │
 │ • Warning System         │
 │ • Crypto Prices          │
-│ • TikTok/FB Downloader   │
-│ • Anonymous Messages     │
+│ • TikTok Downloader      │
+│ • Sticker Converter      │
 │ • Fun Games (RTW, WCG)   │
 │                          │
 └──────────────────────────┘
@@ -4334,6 +4483,24 @@ _Use responsibly!_`,
               text: `*Anti-Delete Status:* ${antiDeleteEnabled ? 'ON ✅' : 'OFF ❌'}\n\n*Usage:*\n.antidel on - Enable\n.antidel off - Disable\n\n_Deleted messages from groups & DMs will be sent to your DM._`,
             });
           }
+          return;
+        }
+
+        // ============================================
+        // AFK Command (DM)
+        // ============================================
+        if (command === "afk" && canUseDM) {
+          const reason = args.join(' ').trim() || 'No reason given';
+          
+          afkUsers[sender] = {
+            reason: reason,
+            time: Date.now()
+          };
+          saveData();
+          
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `\uD83D\uDCA4 *You are now AFK*\n\n\uD83D\uDCDD Reason: ${reason}`,
+          });
           return;
         }
 
@@ -4711,6 +4878,122 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
           return;
         }
 
+        // ============================================
+        // Sticker to Image Command (DM)
+        // ============================================
+        if (command === "toimg" && canUseDM) {
+          try {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted?.stickerMessage) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "\u274C Reply to a sticker to convert it to an image.",
+              });
+              return;
+            }
+
+            if (quoted.stickerMessage.isAnimated) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "\u274C Animated stickers are not supported. Only static stickers can be converted.",
+              });
+              return;
+            }
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u23F3", key: message.key },
+            });
+
+            const stream = await downloadContentFromMessage(quoted.stickerMessage, 'sticker');
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) {
+              buffer = Buffer.concat([buffer, chunk]);
+            }
+
+            const imageBuffer = await sharp(buffer).png().toBuffer();
+
+            await sock.sendMessage(message.key.remoteJid, {
+              image: imageBuffer,
+              caption: '\uD83D\uDDBC\uFE0F Sticker converted to image!',
+            });
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u2705", key: message.key },
+            });
+          } catch (err) {
+            logger.error({ error: err.message }, 'ToImg DM error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "\u274C Failed to convert sticker to image.",
+            });
+          }
+          return;
+        }
+
+        // ============================================
+        // Video/Audio to MP3 Command (DM)
+        // ============================================
+        if (command === "tomp3" && canUseDM) {
+          try {
+            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted?.videoMessage && !quoted?.audioMessage) {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "\u274C Reply to a video or audio message to extract audio.",
+              });
+              return;
+            }
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u23F3", key: message.key },
+            });
+
+            let buffer = Buffer.from([]);
+            let mediaType;
+
+            if (quoted.videoMessage) {
+              const stream = await downloadContentFromMessage(quoted.videoMessage, 'video');
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              mediaType = 'video';
+            } else if (quoted.audioMessage) {
+              const stream = await downloadContentFromMessage(quoted.audioMessage, 'audio');
+              for await (const chunk of stream) {
+                buffer = Buffer.concat([buffer, chunk]);
+              }
+              mediaType = 'audio';
+            }
+
+            const { execSync } = require('child_process');
+            const tempDir = path.join(__dirname, 'temp');
+            if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+            const tempInput = path.join(tempDir, `input_${Date.now()}.${mediaType === 'video' ? 'mp4' : 'ogg'}`);
+            const tempOutput = path.join(tempDir, `output_${Date.now()}.mp3`);
+
+            fs.writeFileSync(tempInput, buffer);
+            execSync(`ffmpeg -i "${tempInput}" -vn -ab 128k -ar 44100 -y "${tempOutput}"`, { stdio: 'pipe' });
+
+            const mp3Buffer = fs.readFileSync(tempOutput);
+
+            fs.unlinkSync(tempInput);
+            fs.unlinkSync(tempOutput);
+
+            await sock.sendMessage(message.key.remoteJid, {
+              audio: mp3Buffer,
+              mimetype: 'audio/mpeg',
+              ptt: false,
+            });
+
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "\u2705", key: message.key },
+            });
+          } catch (err) {
+            logger.error({ error: err.message }, 'ToMP3 DM error');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "\u274C Failed to convert to MP3. Make sure ffmpeg is installed.",
+            });
+          }
+          return;
+        }
+
         if (command === "play" && canUseDM) {
           await playSongCommand(sock, message, args, logger);
           return;
@@ -4746,21 +5029,32 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
           });
           
           try {
-            const apiUrl = `https://apis.davidcyriltech.my.id/download/tiktokv4?url=${encodeURIComponent(tiktokUrl)}`;
-            const response = await axios.get(apiUrl, { timeout: 30000 });
+            const apiUrl = `https://api.idledeveloper.tech/api/tiktok?url=${encodeURIComponent(tiktokUrl)}`;
+            const response = await axios.get(apiUrl, {
+              timeout: 30000,
+              headers: { 'X-API-Key': 'tiktok_e176b399ccea758d1aa6bbc8d29533dde9fbcd96d827460e' }
+            });
             
-            if (response.data && response.data.success && response.data.results) {
-              const results = response.data.results;
-              const videoUrl = results.no_watermark || results.watermark;
+            if (response.data && response.data.success && response.data.data) {
+              const data = response.data.data;
+              const videoUrl = data.video?.noWatermark || data.video?.hdNoWatermark || data.video?.watermark || data.downloadUrls?.noWatermark;
               
               if (videoUrl) {
                 await sock.sendMessage(message.key.remoteJid, {
                   react: { text: "✅", key: message.key },
                 });
                 
+                // Build caption with stats
+                let caption = `🎵 *TikTok Download*\n\n`;
+                if (data.author) caption += `👤 *Author:* ${data.author || data.authorUsername || 'Unknown'}\n`;
+                if (data.description) caption += `📝 ${data.description}\n`;
+                if (data.stats) {
+                  caption += `\n❤️ ${data.stats.likes?.toLocaleString() || 0} • 💬 ${data.stats.comments?.toLocaleString() || 0} • 🔄 ${data.stats.shares?.toLocaleString() || 0}`;
+                }
+                
                 await sock.sendMessage(message.key.remoteJid, {
                   video: { url: videoUrl },
-                  caption: `🎵 *TikTok Download*`,
+                  caption: caption,
                 });
               } else {
                 throw new Error('No video URL found');
@@ -4775,70 +5069,6 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             });
             await sock.sendMessage(message.key.remoteJid, {
               text: `❌ Failed to download TikTok video.\n\n_Try again or check if the URL is valid._`,
-            });
-          }
-          return;
-        }
-
-        // ============================================
-        // Facebook Video Downloader (DM)
-        // ============================================
-        if ((command === "fb" || command === "facebook") && canUseDM) {
-          let fbUrl = args.join(' ').trim();
-          
-          // Check if replying to a message with a Facebook URL
-          if (!fbUrl) {
-            const quotedMsg = message.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-            if (quotedMsg) {
-              const quotedText = quotedMsg.conversation || quotedMsg.extendedTextMessage?.text || '';
-              const urlMatch = quotedText.match(/https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)[^\s]*/i);
-              if (urlMatch) {
-                fbUrl = urlMatch[0];
-              }
-            }
-          }
-          
-          if (!fbUrl || !fbUrl.match(/(facebook\.com|fb\.watch|fb\.com)/i)) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ *Usage:* .fb [facebook url]\n\nOr reply to a Facebook video link with .fb`,
-            });
-            return;
-          }
-          
-          await sock.sendMessage(message.key.remoteJid, {
-            react: { text: "⏳", key: message.key },
-          });
-          
-          try {
-            const apiUrl = `https://apis.davidcyriltech.my.id/facebook3?url=${encodeURIComponent(fbUrl)}&apikey=`;
-            const response = await axios.get(apiUrl, { timeout: 30000 });
-            
-            if (response.data && response.data.success && response.data.result) {
-              const result = response.data.result;
-              const videoUrl = result.hd || result.sd || result.Normal_video;
-              
-              if (videoUrl) {
-                await sock.sendMessage(message.key.remoteJid, {
-                  react: { text: "✅", key: message.key },
-                });
-                
-                await sock.sendMessage(message.key.remoteJid, {
-                  video: { url: videoUrl },
-                  caption: `📘 *Facebook Download*`,
-                });
-              } else {
-                throw new Error('No video URL found');
-              }
-            } else {
-              throw new Error(response.data?.message || 'API error');
-            }
-          } catch (error) {
-            logger.error({ error: error.message }, 'Facebook download error (DM)');
-            await sock.sendMessage(message.key.remoteJid, {
-              react: { text: "❌", key: message.key },
-            });
-            await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ Failed to download Facebook video.\n\n_Try again or check if the URL is valid._`,
             });
           }
           return;
