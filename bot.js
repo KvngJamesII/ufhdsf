@@ -67,6 +67,15 @@ const afkUsers = {}; // { jid: { reason, time } }
 // Anti-mention Settings (for groups)
 const antiMentionGroups = {}; // { groupJid: true/false }
 
+// Anti-Photo Settings (for groups) - { groupJid: 'kick'|'warn'|false }
+const antiPhotoGroups = {};
+
+// Anti-Status Settings (for groups) - { groupJid: 'kick'|'warn'|false }
+const antiStatusGroups = {};
+
+// Anti-Tag Settings (for groups) - { groupJid: 'kick'|'warn'|false }
+const antiTagGroups = {};
+
 // Anti-Delete System
 let antiDeleteEnabled = false; // Global toggle for anti-delete
 const messageCache = new Map(); // Cache messages for anti-delete { messageId: messageData }
@@ -137,6 +146,21 @@ const loadData = () => {
         Object.assign(antiMentionGroups, data.antiMentionGroups);
       }
 
+      // Load anti-photo groups
+      if (data.antiPhotoGroups) {
+        Object.assign(antiPhotoGroups, data.antiPhotoGroups);
+      }
+
+      // Load anti-status groups
+      if (data.antiStatusGroups) {
+        Object.assign(antiStatusGroups, data.antiStatusGroups);
+      }
+
+      // Load anti-tag groups
+      if (data.antiTagGroups) {
+        Object.assign(antiTagGroups, data.antiTagGroups);
+      }
+
       // Load anti-delete setting
       if (data.antiDeleteEnabled !== undefined) {
         antiDeleteEnabled = data.antiDeleteEnabled;
@@ -166,6 +190,9 @@ const saveData = () => {
       wcgStats,
       afkUsers,
       antiMentionGroups,
+      antiPhotoGroups,
+      antiStatusGroups,
+      antiTagGroups,
       antiDeleteEnabled,
       lastSaved: new Date().toISOString()
     };
@@ -1371,6 +1398,9 @@ const getMenu = () => `
 
  ━━━ *CHAT* ━━━
  ◯ *.antilink* on/off
+ ◯ *.antiphoto* kick/warn/off
+ ◯ *.antistatus* kick/warn/off
+ ◯ *.antitag* kick/warn/off
  ◯ *.tagall* - Tag all (.t/.tag)
  ◯ *.hidetag* - Invisible tag
  ◯ *.welcome* on/off
@@ -1895,6 +1925,10 @@ We hope to see you again soon!`;
         text = message.message.conversation;
       else if (message.message.extendedTextMessage)
         text = message.message.extendedTextMessage.text;
+      else if (message.message.imageMessage?.caption)
+        text = message.message.imageMessage.caption;
+      else if (message.message.videoMessage?.caption)
+        text = message.message.videoMessage.caption;
 
       // ============================================
       // Anti-Delete: Cache messages for recovery
@@ -2239,6 +2273,194 @@ We hope to see you again soon!`;
             return;
   }
   }
+
+        // ============================================
+        // Anti-Photo Enforcement (delete images/videos that are not view-once)
+        // ============================================
+        const antiPhotoAction = antiPhotoGroups[message.key.remoteJid];
+        if (antiPhotoAction && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
+          const hasImage = !!message.message.imageMessage;
+          const hasVideo = !!message.message.videoMessage;
+          // Allow view-once messages
+          const isViewOnce = !!message.message.viewOnceMessage || !!message.message.viewOnceMessageV2 || !!message.message.viewOnceMessageV2Extension;
+          
+          if ((hasImage || hasVideo) && !isViewOnce) {
+            const groupId = message.key.remoteJid;
+            const userNumber = sender.split("@")[0];
+            
+            // Delete the message
+            try {
+              await sock.sendMessage(groupId, { delete: message.key });
+            } catch (err) {
+              logger.error({ error: err.message }, 'Failed to delete photo/video');
+            }
+            
+            if (antiPhotoAction === 'kick') {
+              try {
+                await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                await sock.sendMessage(groupId, {
+                  text: `🚫 @${userNumber} removed for sending media (antiphoto).`,
+                  mentions: [sender]
+                });
+              } catch (err) {
+                logger.error({ error: err.message }, 'Failed to kick user (antiphoto)');
+              }
+            } else if (antiPhotoAction === 'warn') {
+              if (!userWarns[groupId]) userWarns[groupId] = {};
+              if (!userWarns[groupId][sender]) userWarns[groupId][sender] = 0;
+              userWarns[groupId][sender]++;
+              const warnCount = userWarns[groupId][sender];
+              saveData();
+              
+              if (warnCount >= 3) {
+                try {
+                  await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                  await sock.sendMessage(groupId, {
+                    text: `🚫 @${userNumber} removed (3 media warnings).`,
+                    mentions: [sender]
+                  });
+                  delete userWarns[groupId][sender];
+                  saveData();
+                } catch (err) {
+                  logger.error({ error: err.message }, 'Failed to kick user (antiphoto warn)');
+                }
+              } else {
+                await sock.sendMessage(groupId, {
+                  text: `⚠️ Warning ${warnCount}/3 @${userNumber} - No photos/videos allowed.`,
+                  mentions: [sender]
+                });
+              }
+            }
+            return;
+          }
+        }
+
+        // ============================================
+        // Anti-Status Enforcement (delete status mention/tag messages)
+        // ============================================
+        const antiStatusAction = antiStatusGroups[message.key.remoteJid];
+        if (antiStatusAction && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
+          // Detect status share messages - they come from status@broadcast context
+          const contextInfo = message.message.extendedTextMessage?.contextInfo || 
+                              message.message.imageMessage?.contextInfo || 
+                              message.message.videoMessage?.contextInfo;
+          const isStatusMention = contextInfo?.mentionedJid?.includes('status@broadcast') ||
+                                  contextInfo?.remoteJid === 'status@broadcast' ||
+                                  message.message.extendedTextMessage?.contextInfo?.isForwarded && 
+                                  contextInfo?.forwardedNewsletterMessageInfo;
+          // Also detect "mentioned you in their status" type messages
+          const msgText = text || '';
+          const isStatusTag = msgText.toLowerCase().includes('status') && contextInfo?.quotedMessage;
+          
+          if (isStatusMention || isStatusTag) {
+            const groupId = message.key.remoteJid;
+            const userNumber = sender.split("@")[0];
+            
+            try {
+              await sock.sendMessage(groupId, { delete: message.key });
+            } catch (err) {
+              logger.error({ error: err.message }, 'Failed to delete status mention');
+            }
+            
+            if (antiStatusAction === 'kick') {
+              try {
+                await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                await sock.sendMessage(groupId, {
+                  text: `🚫 @${userNumber} removed for sharing status in group (antistatus).`,
+                  mentions: [sender]
+                });
+              } catch (err) {
+                logger.error({ error: err.message }, 'Failed to kick user (antistatus)');
+              }
+            } else if (antiStatusAction === 'warn') {
+              if (!userWarns[groupId]) userWarns[groupId] = {};
+              if (!userWarns[groupId][sender]) userWarns[groupId][sender] = 0;
+              userWarns[groupId][sender]++;
+              const warnCount = userWarns[groupId][sender];
+              saveData();
+              
+              if (warnCount >= 3) {
+                try {
+                  await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                  await sock.sendMessage(groupId, {
+                    text: `🚫 @${userNumber} removed (3 status warnings).`,
+                    mentions: [sender]
+                  });
+                  delete userWarns[groupId][sender];
+                  saveData();
+                } catch (err) {
+                  logger.error({ error: err.message }, 'Failed to kick user (antistatus warn)');
+                }
+              } else {
+                await sock.sendMessage(groupId, {
+                  text: `⚠️ Warning ${warnCount}/3 @${userNumber} - No status sharing allowed.`,
+                  mentions: [sender]
+                });
+              }
+            }
+            return;
+          }
+        }
+
+        // ============================================
+        // Anti-Tag Enforcement (prevent tagging all members)
+        // ============================================
+        const antiTagAction = antiTagGroups[message.key.remoteJid];
+        if (antiTagAction && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
+          const mentionedJids = message.message.extendedTextMessage?.contextInfo?.mentionedJid || [];
+          const totalMembers = groupMetadata.participants.length;
+          // If user mentions more than half the group or 10+ people, consider it mass tagging
+          const isMassTag = mentionedJids.length >= Math.min(totalMembers * 0.5, 10) && mentionedJids.length >= 5;
+          
+          if (isMassTag) {
+            const groupId = message.key.remoteJid;
+            const userNumber = sender.split("@")[0];
+            
+            try {
+              await sock.sendMessage(groupId, { delete: message.key });
+            } catch (err) {
+              logger.error({ error: err.message }, 'Failed to delete mass tag message');
+            }
+            
+            if (antiTagAction === 'kick') {
+              try {
+                await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                await sock.sendMessage(groupId, {
+                  text: `🚫 @${userNumber} removed for mass tagging (antitag).`,
+                  mentions: [sender]
+                });
+              } catch (err) {
+                logger.error({ error: err.message }, 'Failed to kick user (antitag)');
+              }
+            } else if (antiTagAction === 'warn') {
+              if (!userWarns[groupId]) userWarns[groupId] = {};
+              if (!userWarns[groupId][sender]) userWarns[groupId][sender] = 0;
+              userWarns[groupId][sender]++;
+              const warnCount = userWarns[groupId][sender];
+              saveData();
+              
+              if (warnCount >= 3) {
+                try {
+                  await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                  await sock.sendMessage(groupId, {
+                    text: `🚫 @${userNumber} removed (3 tag warnings).`,
+                    mentions: [sender]
+                  });
+                  delete userWarns[groupId][sender];
+                  saveData();
+                } catch (err) {
+                  logger.error({ error: err.message }, 'Failed to kick user (antitag warn)');
+                }
+              } else {
+                await sock.sendMessage(groupId, {
+                  text: `⚠️ Warning ${warnCount}/3 @${userNumber} - No mass tagging allowed.`,
+                  mentions: [sender]
+                });
+              }
+            }
+            return;
+          }
+        }
 
         const canUseBot = canUseAsOwner || (botMode === "public");
 
@@ -2675,21 +2897,34 @@ if (command === "vv" && canUseBot) {
 
         if (command === "save" && canUseBot) {
           try {
-            const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
-            if (!quoted) {
-              await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to a status to save it.",
-              });
-              return;
+            // Check for quoted message (reply to a status/image/video)
+            let quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+            let imageMsg = quoted?.imageMessage;
+            let videoMsg = quoted?.videoMessage;
+            
+            // Also check if the status is inside a viewOnce wrapper
+            if (!imageMsg && !videoMsg && quoted?.viewOnceMessage) {
+              const inner = quoted.viewOnceMessage.message || quoted.viewOnceMessage;
+              imageMsg = inner?.imageMessage;
+              videoMsg = inner?.videoMessage;
+              quoted = inner;
+            }
+            if (!imageMsg && !videoMsg && quoted?.viewOnceMessageV2) {
+              const inner = quoted.viewOnceMessageV2.message;
+              imageMsg = inner?.imageMessage;
+              videoMsg = inner?.videoMessage;
+              quoted = inner;
             }
 
-            // Check if this is a status message
-            const imageMsg = quoted?.imageMessage;
-            const videoMsg = quoted?.videoMessage;
+            // If replying didn't work, check if the message itself is an image/video with caption \".save\"
+            if (!imageMsg && !videoMsg) {
+              imageMsg = message.message.imageMessage;
+              videoMsg = message.message.videoMessage;
+            }
 
             if (!imageMsg && !videoMsg) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Reply to an image or video.",
+                text: "❌ Reply to a status/image/video with .save\\n\\nOr send .save as caption on an image/video.",
               });
               return;
             }
@@ -2698,12 +2933,52 @@ if (command === "vv" && canUseBot) {
               react: { text: "⏳", key: message.key },
             });
 
-            // Download the status media
-            const media = await downloadStatusMedia(quoted);
+            // Download the media
+            let mediaData = null;
+            let mediaType = null;
+            let caption = "";
 
-            if (!media || !media.mediaData) {
+            try {
+              if (imageMsg) {
+                const stream = await downloadContentFromMessage(imageMsg, 'image');
+                let buffer = Buffer.from([]);
+                for await (const chunk of stream) {
+                  buffer = Buffer.concat([buffer, chunk]);
+                }
+                mediaData = buffer;
+                mediaType = "image";
+                caption = imageMsg.caption || "";
+              } else if (videoMsg) {
+                const stream = await downloadContentFromMessage(videoMsg, 'video');
+                let buffer = Buffer.from([]);
+                for await (const chunk of stream) {
+                  buffer = Buffer.concat([buffer, chunk]);
+                }
+                mediaData = buffer;
+                mediaType = "video";
+                caption = videoMsg.caption || "";
+              }
+            } catch (dlErr) {
+              logger.error({ error: dlErr.message }, 'Save download via stream failed, trying downloadMediaMessage');
+              // Fallback: try downloadMediaMessage on the original message
+              try {
+                const buffer = await downloadMediaMessage(message, 'buffer', {});
+                if (buffer) {
+                  mediaData = buffer;
+                  mediaType = imageMsg ? "image" : "video";
+                  caption = (imageMsg || videoMsg)?.caption || "";
+                }
+              } catch (dlErr2) {
+                logger.error({ error: dlErr2.message }, 'Save fallback download also failed');
+              }
+            }
+
+            if (!mediaData) {
               await sock.sendMessage(message.key.remoteJid, {
-                text: "❌ Download failed.",
+                react: { text: "❌", key: message.key },
+              });
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Download failed. The status may have expired.",
               });
               return;
             }
@@ -2713,13 +2988,13 @@ if (command === "vv" && canUseBot) {
 
             // Send the media to user's DM
             const sendOptions = {
-              caption: media.caption || '',
+              caption: caption || '',
             };
 
-            if (media.mediaType === "image") {
-              sendOptions.image = media.mediaData;
-            } else if (media.mediaType === "video") {
-              sendOptions.video = media.mediaData;
+            if (mediaType === "image") {
+              sendOptions.image = mediaData;
+            } else if (mediaType === "video") {
+              sendOptions.video = mediaData;
             }
 
             await sock.sendMessage(senderJid, sendOptions);
@@ -2734,7 +3009,7 @@ if (command === "vv" && canUseBot) {
               text: `✅ Sent to your DM.`,
             }, { quoted: message });
 
-            logger.info({ sender: senderJid, mediaType: media.mediaType }, 'Status saved');
+            logger.info({ sender: senderJid, mediaType: mediaType }, 'Status saved');
 
           } catch (error) {
             logger.error({ error: error.message, stack: error.stack }, 'Save command error');
@@ -3047,18 +3322,6 @@ if (command === "vv" && canUseBot) {
                       caption: media.caption || "View-once video saved (via sticker)",
                     });
                   }
-
-                  await sock.sendMessage(message.key.remoteJid, {
-                    react: { text: "✅", key: message.key },
-                  });
-
-                  setTimeout(async () => {
-                    try {
-                      await sock.sendMessage(message.key.remoteJid, {
-                        react: { text: "", key: message.key },
-                      });
-                    } catch (err) {}
-                  }, 1000);
                 } catch (err) {
                   logger.error({ error: err.message }, 'Sticker vv error');
                 }
@@ -3649,6 +3912,111 @@ if (command === "vv" && canUseBot) {
             text: isOn ? "Antilink enabled." : "Antilink disabled.",
           });
           logger.info({ group: message.key.remoteJid, enabled: isOn }, 'Antilink toggled');
+          return;
+        }
+
+        // ============================================
+        // Anti-Photo Command
+        // ============================================
+        if (command === "antiphoto") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const action = args[0]?.toLowerCase();
+
+          if (!action || !["kick", "warn", "off"].includes(action)) {
+            const currentStatus = antiPhotoGroups[message.key.remoteJid] || 'off';
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `📷 *Anti-Photo*\n\nCurrent: *${currentStatus.toUpperCase()}*\n\n*Usage:*\n• .antiphoto kick - Delete & kick sender\n• .antiphoto warn - Delete & warn (3 = kick)\n• .antiphoto off - Disable\n\n_Blocks images & videos (view-once allowed)_`,
+            });
+            return;
+          }
+
+          if (action === "off") {
+            delete antiPhotoGroups[message.key.remoteJid];
+          } else {
+            antiPhotoGroups[message.key.remoteJid] = action;
+          }
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: action === "off" ? "❌ Anti-Photo disabled." : `✅ Anti-Photo enabled (*${action}*).`,
+          });
+          logger.info({ group: message.key.remoteJid, action }, 'Antiphoto toggled');
+          return;
+        }
+
+        // ============================================
+        // Anti-Status Command
+        // ============================================
+        if (command === "antistatus") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const action = args[0]?.toLowerCase();
+
+          if (!action || !["kick", "warn", "off"].includes(action)) {
+            const currentStatus = antiStatusGroups[message.key.remoteJid] || 'off';
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `📢 *Anti-Status*\n\nCurrent: *${currentStatus.toUpperCase()}*\n\n*Usage:*\n• .antistatus kick - Delete & kick sender\n• .antistatus warn - Delete & warn (3 = kick)\n• .antistatus off - Disable\n\n_Blocks status mention/tag messages in group_`,
+            });
+            return;
+          }
+
+          if (action === "off") {
+            delete antiStatusGroups[message.key.remoteJid];
+          } else {
+            antiStatusGroups[message.key.remoteJid] = action;
+          }
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: action === "off" ? "❌ Anti-Status disabled." : `✅ Anti-Status enabled (*${action}*).`,
+          });
+          logger.info({ group: message.key.remoteJid, action }, 'Antistatus toggled');
+          return;
+        }
+
+        // ============================================
+        // Anti-Tag Command
+        // ============================================
+        if (command === "antitag") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const action = args[0]?.toLowerCase();
+
+          if (!action || !["kick", "warn", "off"].includes(action)) {
+            const currentStatus = antiTagGroups[message.key.remoteJid] || 'off';
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `🏷️ *Anti-Tag*\n\nCurrent: *${currentStatus.toUpperCase()}*\n\n*Usage:*\n• .antitag kick - Delete & kick sender\n• .antitag warn - Delete & warn (3 = kick)\n• .antitag off - Disable\n\n_Blocks users from mass tagging group members_`,
+            });
+            return;
+          }
+
+          if (action === "off") {
+            delete antiTagGroups[message.key.remoteJid];
+          } else {
+            antiTagGroups[message.key.remoteJid] = action;
+          }
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: action === "off" ? "❌ Anti-Tag disabled." : `✅ Anti-Tag enabled (*${action}*).`,
+          });
+          logger.info({ group: message.key.remoteJid, action }, 'Antitag toggled');
           return;
         }
 
@@ -5106,18 +5474,6 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
                       caption: `🎥 View-once from DM (via sticker)\n${media.caption || ""}`,
                     });
                   }
-
-                  await sock.sendMessage(message.key.remoteJid, {
-                    react: { text: "✅", key: message.key },
-                  });
-
-                  setTimeout(async () => {
-                    try {
-                      await sock.sendMessage(message.key.remoteJid, {
-                        react: { text: "", key: message.key },
-                      });
-                    } catch (err) {}
-                  }, 3000);
 
                   logger.info('View-once from DM saved via sticker');
                 } catch (err) {
