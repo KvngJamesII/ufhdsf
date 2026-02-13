@@ -1655,6 +1655,7 @@ Ready to manage!`,
               .trim();
 
             // If image placeholder is used, fetch the profile picture and send as image
+            const defaultAvatarUrl = 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/bc/Unknown_person.jpg/434px-Unknown_person.jpg';
             let ppUrl = null;
             if (hasUserPP) {
               try {
@@ -1663,7 +1664,7 @@ Ready to manage!`,
                 try {
                   ppUrl = await sock.profilePictureUrl(participantJid, 'display');
                 } catch (e2) {
-                  ppUrl = null;
+                  ppUrl = defaultAvatarUrl;
                 }
               }
             } else if (hasGrpPP) {
@@ -1673,7 +1674,7 @@ Ready to manage!`,
                 try {
                   ppUrl = await sock.profilePictureUrl(groupJid, 'display');
                 } catch (e2) {
-                  ppUrl = null;
+                  ppUrl = defaultAvatarUrl;
                 }
               }
             }
@@ -1689,12 +1690,22 @@ Ready to manage!`,
                   mentions: [participantJid]
                 });
               } catch (ppErr) {
-                // Fallback to text if image download fails
-                logger.error({ error: ppErr.message }, 'Failed to fetch profile pic for welcome');
-                await sock.sendMessage(groupJid, {
-                  text: welcomeMessage,
-                  mentions: [participantJid]
-                });
+                // Fallback to default avatar if image download fails
+                logger.error({ error: ppErr.message }, 'Failed to fetch profile pic, using default avatar');
+                try {
+                  const defResponse = await axios.get(defaultAvatarUrl, { responseType: 'arraybuffer', timeout: 10000 });
+                  const defBuffer = Buffer.from(defResponse.data);
+                  await sock.sendMessage(groupJid, {
+                    image: defBuffer,
+                    caption: welcomeMessage,
+                    mentions: [participantJid]
+                  });
+                } catch (defErr) {
+                  await sock.sendMessage(groupJid, {
+                    text: welcomeMessage,
+                    mentions: [participantJid]
+                  });
+                }
               }
             } else {
               // Send as regular text
@@ -2311,7 +2322,7 @@ We hope to see you again soon!`;
               try {
                 await sock.groupParticipantsUpdate(groupId, [sender], "remove");
                 await sock.sendMessage(groupId, {
-                  text: `🚫 @${userNumber} removed for sending media (antiphoto).`,
+                  text: `🚫 @${userNumber} removed. Only View Once Photo/Video are allowed here.`,
                   mentions: [sender]
                 });
               } catch (err) {
@@ -2328,7 +2339,7 @@ We hope to see you again soon!`;
                 try {
                   await sock.groupParticipantsUpdate(groupId, [sender], "remove");
                   await sock.sendMessage(groupId, {
-                    text: `🚫 @${userNumber} removed (3 media warnings).`,
+                    text: `🚫 @${userNumber} removed (3 warnings). Only View Once Photo/Video are allowed here.`,
                     mentions: [sender]
                   });
                   delete userWarns[groupId][sender];
@@ -2338,7 +2349,7 @@ We hope to see you again soon!`;
                 }
               } else {
                 await sock.sendMessage(groupId, {
-                  text: `⚠️ Warning ${warnCount}/3 @${userNumber} - No photos/videos allowed.`,
+                  text: `⚠️ Warning ${warnCount}/3 @${userNumber} - Only View Once Photo/Video are allowed here.`,
                   mentions: [sender]
                 });
               }
@@ -2352,19 +2363,36 @@ We hope to see you again soon!`;
         // ============================================
         const antiStatusAction = antiStatusGroups[message.key.remoteJid];
         if (antiStatusAction && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
-          // Detect status share messages - they come from status@broadcast context
-          const contextInfo = message.message.extendedTextMessage?.contextInfo || 
-                              message.message.imageMessage?.contextInfo || 
-                              message.message.videoMessage?.contextInfo;
-          const isStatusMention = contextInfo?.mentionedJid?.includes('status@broadcast') ||
-                                  contextInfo?.remoteJid === 'status@broadcast' ||
-                                  message.message.extendedTextMessage?.contextInfo?.isForwarded && 
-                                  contextInfo?.forwardedNewsletterMessageInfo;
-          // Also detect "mentioned you in their status" type messages
-          const msgText = text || '';
-          const isStatusTag = msgText.toLowerCase().includes('status') && contextInfo?.quotedMessage;
+          // Detect status share/mention messages in groups
+          // When someone mentions a group in their status, WhatsApp sends the status to that group
+          // These messages have specific patterns in their structure
+          const msg = message.message;
+          const contextInfo = msg.extendedTextMessage?.contextInfo || 
+                              msg.imageMessage?.contextInfo || 
+                              msg.videoMessage?.contextInfo ||
+                              msg.viewOnceMessage?.message?.imageMessage?.contextInfo ||
+                              msg.viewOnceMessage?.message?.videoMessage?.contextInfo ||
+                              msg.viewOnceMessageV2?.message?.imageMessage?.contextInfo ||
+                              msg.viewOnceMessageV2?.message?.videoMessage?.contextInfo;
           
-          if (isStatusMention || isStatusTag) {
+          // Check for status@broadcast in various places
+          const isStatusMention = 
+            contextInfo?.remoteJid === 'status@broadcast' ||
+            contextInfo?.participant?.endsWith('@s.whatsapp.net') && contextInfo?.remoteJid === 'status@broadcast' ||
+            contextInfo?.mentionedJid?.includes('status@broadcast') ||
+            message.key?.remoteJid?.endsWith('@g.us') && contextInfo?.stanzaId && contextInfo?.remoteJid === 'status@broadcast' ||
+            // Status V3 shares
+            !!msg.statusMentionMessage ||
+            // Extended text with status broadcast context
+            (msg.extendedTextMessage && contextInfo?.remoteJid === 'status@broadcast') ||
+            // Image/video forwarded from status
+            ((msg.imageMessage || msg.videoMessage) && contextInfo?.remoteJid === 'status@broadcast') ||
+            // Ephemeral wrapped status messages
+            (msg.ephemeralMessage?.message?.extendedTextMessage?.contextInfo?.remoteJid === 'status@broadcast') ||
+            (msg.ephemeralMessage?.message?.imageMessage?.contextInfo?.remoteJid === 'status@broadcast') ||
+            (msg.ephemeralMessage?.message?.videoMessage?.contextInfo?.remoteJid === 'status@broadcast');
+          
+          if (isStatusMention) {
             const groupId = message.key.remoteJid;
             const userNumber = sender.split("@")[0];
             
