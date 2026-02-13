@@ -1655,8 +1655,9 @@ Ready to manage!`,
               .trim();
 
             // If image placeholder is used, fetch the profile picture and send as image
-            const defaultAvatarUrl = 'https://upload.wikimedia.org/wikipedia/commons/thumb/b/bc/Unknown_person.jpg/434px-Unknown_person.jpg';
+            const defaultAvatarPath = path.join(__dirname, 'images', 'default_avatar.png');
             let ppUrl = null;
+            let useLocalFallback = false;
             if (hasUserPP) {
               try {
                 ppUrl = await sock.profilePictureUrl(participantJid, 'image');
@@ -1664,7 +1665,7 @@ Ready to manage!`,
                 try {
                   ppUrl = await sock.profilePictureUrl(participantJid, 'display');
                 } catch (e2) {
-                  ppUrl = defaultAvatarUrl;
+                  useLocalFallback = true;
                 }
               }
             } else if (hasGrpPP) {
@@ -1674,27 +1675,31 @@ Ready to manage!`,
                 try {
                   ppUrl = await sock.profilePictureUrl(groupJid, 'display');
                 } catch (e2) {
-                  ppUrl = defaultAvatarUrl;
+                  useLocalFallback = true;
                 }
               }
             }
 
-            if (ppUrl && (hasGrpPP || hasUserPP)) {
+            if ((ppUrl || useLocalFallback) && (hasGrpPP || hasUserPP)) {
               // Send as image with caption
               try {
-                const ppResponse = await axios.get(ppUrl, { responseType: 'arraybuffer', timeout: 10000 });
-                const ppBuffer = Buffer.from(ppResponse.data);
+                let ppBuffer;
+                if (ppUrl && !useLocalFallback) {
+                  const ppResponse = await axios.get(ppUrl, { responseType: 'arraybuffer', timeout: 10000 });
+                  ppBuffer = Buffer.from(ppResponse.data);
+                } else {
+                  ppBuffer = fs.readFileSync(defaultAvatarPath);
+                }
                 await sock.sendMessage(groupJid, {
                   image: ppBuffer,
                   caption: welcomeMessage,
                   mentions: [participantJid]
                 });
               } catch (ppErr) {
-                // Fallback to default avatar if image download fails
+                // Fallback to local default avatar if URL download fails
                 logger.error({ error: ppErr.message }, 'Failed to fetch profile pic, using default avatar');
                 try {
-                  const defResponse = await axios.get(defaultAvatarUrl, { responseType: 'arraybuffer', timeout: 10000 });
-                  const defBuffer = Buffer.from(defResponse.data);
+                  const defBuffer = fs.readFileSync(defaultAvatarPath);
                   await sock.sendMessage(groupJid, {
                     image: defBuffer,
                     caption: welcomeMessage,
