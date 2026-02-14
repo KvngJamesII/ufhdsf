@@ -297,67 +297,83 @@ const isLinkMessage = (text) => {
 const fetchCryptoPrice = async (symbol) => {
   try {
     const upperSymbol = symbol.toUpperCase();
+    const lowerSymbol = symbol.toLowerCase();
 
-    // Map common symbols to CoinGecko IDs
-    const symbolMap = {
-      'BTC': 'bitcoin',
-      'ETH': 'ethereum',
-      'SOL': 'solana',
-      'DOGE': 'dogecoin',
-      'ADA': 'cardano',
-      'DOT': 'polkadot',
-      'MATIC': 'matic-network',
-      'LINK': 'chainlink',
-      'XRP': 'ripple',
-      'BNB': 'binancecoin',
-      'AVAX': 'avalanche-2',
-      'UNI': 'uniswap',
-      'LTC': 'litecoin',
-      'ATOM': 'cosmos',
-      'NEAR': 'near',
-      'FTM': 'fantom',
-      'ALGO': 'algorand',
-      'VET': 'vechain',
-      'ICP': 'internet-computer',
-      'APT': 'aptos',
-      'ARB': 'arbitrum',
-      'OP': 'optimism',
-      'PEPE': 'pepe',
-      'SHIB': 'shiba-inu',
-      'COAI': 'coai',
-      'TON': 'toncoin'
-    };
+    // Try DexScreener first (supports any token/pair globally)
+    try {
+      const dexUrl = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(symbol)}`;
+      logger.info({ url: dexUrl }, 'Trying DexScreener API');
+      const dexRes = await fetch(dexUrl);
+      if (dexRes.ok) {
+        const dexData = await dexRes.json();
+        if (dexData.pairs && dexData.pairs.length > 0) {
+          // Pick the pair with the highest liquidity
+          const pair = dexData.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+          const priceUsd = parseFloat(pair.priceUsd || 0);
+          const change24h = parseFloat(pair.priceChange?.h24 || 0);
+          const vol24h = parseFloat(pair.volume?.h24 || 0);
+          const mcap = parseFloat(pair.marketCap || pair.fdv || 0);
+          const tokenSymbol = pair.baseToken?.symbol || upperSymbol;
+          const tokenName = pair.baseToken?.name || '';
+          const chain = pair.chainId || '';
+          const dexName = pair.dexId || '';
+          const pairUrl = pair.url || '';
 
-    const coinId = symbolMap[upperSymbol] || upperSymbol.toLowerCase();
-
-    // Fetch from CoinGecko
-    const coingeckoUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`;
-    logger.info({ url: coingeckoUrl, coinId }, 'Trying CoinGecko API');
-    let response = await fetch(coingeckoUrl);
-    logger.info({ status: response.status, ok: response.ok }, 'CoinGecko API response status');
-
-    if (response.ok) {
-      const data = await response.json();
-      logger.info({ fullData: data }, 'CoinGecko full API response');
-      const cryptoData = data[coinId];
-      if (cryptoData) {
-        logger.info({ cryptoData }, 'CoinGecko parsed data');
-        return {
-          symbol: upperSymbol,
-          lastPrice: cryptoData.usd,
-          priceChangePercent: cryptoData.usd_24h_change || 0,
-          volume: 0, // CoinGecko simple price doesn't provide volume directly
-          marketCap: cryptoData.usd_market_cap || 0,
-        };
-      } else {
-        logger.warn({ coinId, availableKeys: Object.keys(data) }, 'Coin ID not found in response');
+          return {
+            symbol: tokenSymbol,
+            name: tokenName,
+            lastPrice: priceUsd,
+            priceChangePercent: change24h,
+            volume: vol24h,
+            marketCap: mcap,
+            chain,
+            dex: dexName,
+            pairUrl,
+            source: 'DexScreener'
+          };
+        }
       }
-    } else {
-      const errorText = await response.text();
-      logger.warn({ status: response.status, error: errorText }, 'CoinGecko API failed');
+    } catch (dexErr) {
+      logger.warn({ error: dexErr.message }, 'DexScreener API failed');
     }
 
-    logger.error({ symbol: upperSymbol, coinId }, 'No API returned valid data');
+    // Fallback: CoinGecko for well-known coins
+    const symbolMap = {
+      'BTC': 'bitcoin', 'ETH': 'ethereum', 'SOL': 'solana',
+      'DOGE': 'dogecoin', 'ADA': 'cardano', 'DOT': 'polkadot',
+      'XRP': 'ripple', 'BNB': 'binancecoin', 'AVAX': 'avalanche-2',
+      'LTC': 'litecoin', 'ATOM': 'cosmos', 'NEAR': 'near',
+      'PEPE': 'pepe', 'SHIB': 'shiba-inu', 'TON': 'toncoin',
+      'LINK': 'chainlink', 'UNI': 'uniswap', 'ARB': 'arbitrum',
+      'OP': 'optimism', 'MATIC': 'matic-network', 'APT': 'aptos'
+    };
+
+    const coinId = symbolMap[upperSymbol] || lowerSymbol;
+
+    try {
+      const coingeckoUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`;
+      logger.info({ url: coingeckoUrl, coinId }, 'Trying CoinGecko API');
+      const response = await fetch(coingeckoUrl);
+      if (response.ok) {
+        const data = await response.json();
+        const cryptoData = data[coinId];
+        if (cryptoData) {
+          return {
+            symbol: upperSymbol,
+            name: '',
+            lastPrice: cryptoData.usd,
+            priceChangePercent: cryptoData.usd_24h_change || 0,
+            volume: 0,
+            marketCap: cryptoData.usd_market_cap || 0,
+            source: 'CoinGecko'
+          };
+        }
+      }
+    } catch (cgErr) {
+      logger.warn({ error: cgErr.message }, 'CoinGecko API failed');
+    }
+
+    logger.error({ symbol: upperSymbol }, 'No API returned valid data');
     return null;
   } catch (error) {
     logger.error({ error: error.message, stack: error.stack }, 'Crypto fetch error');
@@ -2846,17 +2862,7 @@ We hope to see you again soon!`;
             const upperSym = symbol.toUpperCase();
 
             await sock.sendMessage(message.key.remoteJid, {
-              text: `Could not find data for *${upperSym}*
-
-Tips:
-- Check if the symbol is correct
-- The coin might not be listed on CoinGecko
-- Try popular coins like: BTC, ETH, SOL, TON, BNB, ADA, XRP, DOGE, MATIC, DOT
-
-How to add new coins:
-If you know the CoinGecko ID for ${upperSym}, contact the bot owner to add it.
-
-Example: Search "coingecko ${upperSym}" to find the correct ID.`,
+              text: `Could not find data for *${upperSym}*\n\nTips:\n- Check if the symbol/name is correct\n- Try the full token name (e.g. "pepe" instead of abbreviation)\n- Try pasting a contract address\n\nExamples: .live btc, .live pepe, .live coai`,
             });
             return;
           }
@@ -2876,19 +2882,13 @@ Example: Search "coingecko ${upperSym}" to find the correct ID.`,
           });
           const changeLabel = change24h >= 0 ? "UP" : "DOWN";
           const changeSign = change24h >= 0 ? "+" : "";
+          const nameStr = data.name ? ` (${data.name})` : '';
+          const chainStr = data.chain ? `\nChain: ${data.chain}` : '';
+          const dexStr = data.dex ? `\nDEX: ${data.dex}` : '';
+          const linkStr = data.pairUrl ? `\n\n🔗 ${data.pairUrl}` : '';
 
           await sock.sendMessage(message.key.remoteJid, {
-            text: `${data.symbol} Live Price
-
-Price: $${price}
-${changeLabel} 24h Change: ${changeSign}${change24h}%
-
-24h Stats:
-Volume: $${volume}
-Market Cap: $${marketCap}
-
-Updated: ${new Date().toLocaleTimeString()}
-Source: CoinGecko`,
+            text: `${data.symbol}${nameStr} Live Price\n\nPrice: $${price}\n${changeLabel} 24h Change: ${changeSign}${change24h}%\n\n24h Stats:\nVolume: $${volume}\nMarket Cap: $${marketCap}${chainStr}${dexStr}\n\nUpdated: ${new Date().toLocaleTimeString()}\nSource: ${data.source || 'DexScreener'}${linkStr}`,
           });
 
           await sock.sendMessage(message.key.remoteJid, {
@@ -5482,17 +5482,7 @@ _Use responsibly!_`,
             const upperSym = symbol.toUpperCase();
 
             await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ Could not find data for *${upperSym}*
-
-💡 *Tips:*
-• Check if the symbol is correct
-• The coin might not be listed on CoinGecko
-• Try popular coins like: BTC, ETH, SOL, TON, BNB, ADA, XRP, DOGE, MATIC, DOT
-
-🔍 *How to add new coins:*
-If you know the CoinGecko ID for ${upperSym}, contact the bot owner to add it.
-
-Example: Search "coingecko ${upperSym}" to find the correct ID.`,
+              text: `❌ Could not find data for *${upperSym}*\n\n💡 *Tips:*\n• Check if the symbol/name is correct\n• Try the full token name (e.g. "pepe")\n• Try pasting a contract address\n\nExamples: .live btc, .live pepe, .live coai`,
             });
             return;
           }
@@ -5512,19 +5502,13 @@ Example: Search "coingecko ${upperSym}" to find the correct ID.`,
           });
           const changeEmoji = change24h >= 0 ? "📈" : "📉";
           const changeSign = change24h >= 0 ? "+" : "";
+          const nameStr = data.name ? ` (${data.name})` : '';
+          const chainStr = data.chain ? `\n⛓️ Chain: ${data.chain}` : '';
+          const dexStr = data.dex ? `\n🏦 DEX: ${data.dex}` : '';
+          const linkStr = data.pairUrl ? `\n\n🔗 ${data.pairUrl}` : '';
 
           await sock.sendMessage(message.key.remoteJid, {
-            text: `💹 *${data.symbol}* Live Price
-
-💰 *Price:* $${price}
-${changeEmoji} *24h Change:* ${changeSign}${change24h}%
-
-📊 *24h Stats:*
-📦 Volume: $${volume}
-💎 Market Cap: $${marketCap}
-
-⏰ Updated: ${new Date().toLocaleTimeString()}
-💡 Source: CoinGecko`,
+            text: `💹 *${data.symbol}*${nameStr} Live Price\n\n💰 *Price:* $${price}\n${changeEmoji} *24h Change:* ${changeSign}${change24h}%\n\n📊 *24h Stats:*\n📦 Volume: $${volume}\n💎 Market Cap: $${marketCap}${chainStr}${dexStr}\n\n⏰ Updated: ${new Date().toLocaleTimeString()}\n💡 Source: ${data.source || 'DexScreener'}${linkStr}`,
           });
 
           await sock.sendMessage(message.key.remoteJid, {
@@ -6079,6 +6063,47 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
             logger.error({ error: err.message }, 'Delete DM error');
             await sock.sendMessage(message.key.remoteJid, {
               text: "❌ Failed to delete.",
+            });
+          }
+          return;
+        }
+
+        if (command === "block" && isOwner) {
+          const number = args[0]?.replace(/[^0-9]/g, '');
+          if (!number) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Usage: .block [number]\n\nExample: .block 2347073260074",
+            });
+            return;
+          }
+          const targetJid = `${number}@s.whatsapp.net`;
+          if (!blockedUsers[myJid]) blockedUsers[myJid] = new Set();
+          blockedUsers[myJid].add(targetJid);
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `✅ User ${number} blocked.`,
+          });
+          logger.info({ target: targetJid }, 'User blocked from DM');
+          return;
+        }
+
+        if (command === "unblock" && isOwner) {
+          const number = args[0]?.replace(/[^0-9]/g, '');
+          if (!number) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Usage: .unblock [number]\n\nExample: .unblock 2347073260074",
+            });
+            return;
+          }
+          const targetJid = `${number}@s.whatsapp.net`;
+          if (blockedUsers[myJid]?.has(targetJid)) {
+            blockedUsers[myJid].delete(targetJid);
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ User ${number} unblocked.`,
+            });
+            logger.info({ target: targetJid }, 'User unblocked from DM');
+          } else {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ User not found in blocked list.`,
             });
           }
           return;
