@@ -6090,13 +6090,8 @@ _Use responsibly!_`,
         }
 
         if (command === "block" && isOwner) {
-          const number = args[0]?.replace(/[^0-9]/g, '');
-          if (!number) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Usage: .block [number]\n\nExample: .block 2347073260074",
-            });
-            return;
-          }
+          // If no number provided, block the person whose DM we're in
+          const number = args[0]?.replace(/[^0-9]/g, '') || message.key.remoteJid.split('@')[0];
           const targetJid = `${number}@s.whatsapp.net`;
           if (!blockedUsers[myJid]) blockedUsers[myJid] = new Set();
           blockedUsers[myJid].add(targetJid);
@@ -6108,13 +6103,8 @@ _Use responsibly!_`,
         }
 
         if (command === "unblock" && isOwner) {
-          const number = args[0]?.replace(/[^0-9]/g, '');
-          if (!number) {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Usage: .unblock [number]\n\nExample: .unblock 2347073260074",
-            });
-            return;
-          }
+          // If no number provided, unblock the person whose DM we're in
+          const number = args[0]?.replace(/[^0-9]/g, '') || message.key.remoteJid.split('@')[0];
           const targetJid = `${number}@s.whatsapp.net`;
           if (blockedUsers[myJid]?.has(targetJid)) {
             blockedUsers[myJid].delete(targetJid);
