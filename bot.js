@@ -79,6 +79,12 @@ const antiStatusGroups = {};
 // Anti-Tag Settings (for groups) - { groupJid: 'kick'|'warn'|false }
 const antiTagGroups = {};
 
+// Anti-Spam Settings (for groups) - { groupJid: 'kick'|'warn'|false }
+const antiSpamGroups = {};
+const spamTracker = new Map(); // { 'groupJid:senderJid': { count, firstMsgTime, lastWarnTime } }
+const SPAM_THRESHOLD = 8; // messages within time window
+const SPAM_WINDOW = 5000; // 5 seconds
+
 // Anti-Delete System
 let antiDeleteEnabled = false; // Global toggle for anti-delete
 const messageCache = new Map(); // Cache messages for anti-delete { messageId: messageData }
@@ -167,6 +173,11 @@ const loadData = () => {
         Object.assign(antiTagGroups, data.antiTagGroups);
       }
 
+      // Load anti-spam groups
+      if (data.antiSpamGroups) {
+        Object.assign(antiSpamGroups, data.antiSpamGroups);
+      }
+
       // Load anti-delete setting
       if (data.antiDeleteEnabled !== undefined) {
         antiDeleteEnabled = data.antiDeleteEnabled;
@@ -200,6 +211,7 @@ const saveData = () => {
       antiPhotoGroups,
       antiStatusGroups,
       antiTagGroups,
+      antiSpamGroups,
       antiDeleteEnabled,
       lastSaved: new Date().toISOString()
     };
@@ -1467,6 +1479,7 @@ const getMenu = () => `
  ◯ *.antiphoto* kick/warn/off
  ◯ *.antistatus* kick/warn/off
  ◯ *.antitag* kick/warn/off
+ ◯ *.antispam* kick/warn/off
  ◯ *.tagall* - Tag all (.t/.tag)
  ◯ *.hidetag* [msg] - Tag all
  ◯ *.add* [number]
@@ -2655,6 +2668,83 @@ We hope to see you again soon!`;
                 });
               }
             }
+            return;
+          }
+        }
+
+        // ============================================
+        // Anti-Spam Enforcement (rate-limit messages)
+        // ============================================
+        const antiSpamAction = antiSpamGroups[message.key.remoteJid];
+        if (antiSpamAction && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
+          const groupId = message.key.remoteJid;
+          const trackerKey = `${groupId}:${sender}`;
+          const now = Date.now();
+          let tracker = spamTracker.get(trackerKey);
+
+          if (!tracker || (now - tracker.firstMsgTime > SPAM_WINDOW)) {
+            // Reset window
+            tracker = { count: 1, firstMsgTime: now, lastWarnTime: 0 };
+            spamTracker.set(trackerKey, tracker);
+          } else {
+            tracker.count++;
+          }
+
+          if (tracker.count >= SPAM_THRESHOLD) {
+            const userNumber = sender.split("@")[0];
+
+            // Delete the spam message
+            try {
+              await sock.sendMessage(groupId, { delete: message.key });
+            } catch (err) {
+              logger.error({ error: err.message }, 'Failed to delete spam message');
+            }
+
+            if (antiSpamAction === 'kick') {
+              try {
+                await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                await sock.sendMessage(groupId, {
+                  text: `🚫 @${userNumber} removed for spamming.`,
+                  mentions: [sender]
+                });
+              } catch (err) {
+                logger.error({ error: err.message }, 'Failed to kick user (antispam)');
+              }
+              spamTracker.delete(trackerKey);
+            } else if (antiSpamAction === 'warn') {
+              // Only warn once per spam burst (avoid spamming warnings)
+              if (now - tracker.lastWarnTime > 10000) {
+                tracker.lastWarnTime = now;
+                if (!userWarns[groupId]) userWarns[groupId] = {};
+                if (!userWarns[groupId][sender]) userWarns[groupId][sender] = 0;
+                userWarns[groupId][sender]++;
+                const warnCount = userWarns[groupId][sender];
+                saveData();
+
+                if (warnCount >= 3) {
+                  try {
+                    await sock.groupParticipantsUpdate(groupId, [sender], "remove");
+                    await sock.sendMessage(groupId, {
+                      text: `🚫 @${userNumber} removed (3 spam warnings).`,
+                      mentions: [sender]
+                    });
+                    delete userWarns[groupId][sender];
+                    saveData();
+                  } catch (err) {
+                    logger.error({ error: err.message }, 'Failed to kick user (antispam warn)');
+                  }
+                  spamTracker.delete(trackerKey);
+                } else {
+                  await sock.sendMessage(groupId, {
+                    text: `⚠️ Warning ${warnCount}/3 @${userNumber} - Slow down! No spamming.`,
+                    mentions: [sender]
+                  });
+                }
+              }
+            }
+            // Reset count after action
+            tracker.count = 0;
+            tracker.firstMsgTime = now;
             return;
           }
         }
@@ -4243,6 +4333,41 @@ if (command === "vv" && canUseBot) {
             text: action === "off" ? "❌ Anti-Tag disabled." : `✅ Anti-Tag enabled (*${action}*).`,
           });
           logger.info({ group: message.key.remoteJid, action }, 'Antitag toggled');
+          return;
+        }
+
+        // ============================================
+        // Anti-Spam Command
+        // ============================================
+        if (command === "antispam") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const action = args[0]?.toLowerCase();
+
+          if (!action || !["kick", "warn", "off"].includes(action)) {
+            const currentStatus = antiSpamGroups[message.key.remoteJid] || 'off';
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `⚡ *Anti-Spam*\n\nCurrent: *${currentStatus.toUpperCase()}*\n\n*Usage:*\n• .antispam kick - Kick spammers\n• .antispam warn - Warn spammers (3 = kick)\n• .antispam off - Disable\n\n_Detects ${SPAM_THRESHOLD}+ messages within ${SPAM_WINDOW / 1000}s_`,
+            });
+            return;
+          }
+
+          if (action === "off") {
+            delete antiSpamGroups[message.key.remoteJid];
+          } else {
+            antiSpamGroups[message.key.remoteJid] = action;
+          }
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: action === "off" ? "❌ Anti-Spam disabled." : `✅ Anti-Spam enabled (*${action}*).`,
+          });
+          logger.info({ group: message.key.remoteJid, action }, 'Antispam toggled');
           return;
         }
 
