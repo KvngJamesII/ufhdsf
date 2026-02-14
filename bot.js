@@ -6205,7 +6205,7 @@ async function playSongCommand(sock, message, args, logger) {
         '-o', path.join(tmpDir, `${tempId}.%(ext)s`),
         video.url
       ];
-      const proc = execFile('yt-dlp', args, { timeout: 120000 }, (error, stdout, stderr) => {
+      const proc = execFile('python3', ['-m', 'yt_dlp', ...args], { timeout: 120000 }, (error, stdout, stderr) => {
         if (error) reject(error);
         else resolve(stdout);
       });
