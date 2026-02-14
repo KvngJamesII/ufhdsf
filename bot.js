@@ -588,20 +588,22 @@ _${msg.message}_
 // RTW (Rearrange The Words) Game System
 // ============================================
 
-// Load words from file
+// Load words from file (cached)
+let cachedRTWWords = null;
 const loadRTWWords = () => {
+  if (cachedRTWWords) return cachedRTWWords;
   try {
     if (!fs.existsSync(WORDS_FILE)) {
       logger.error('Words file not found');
       return null;
     }
-    const allWords = fs.readFileSync(WORDS_FILE, 'utf8')
+    cachedRTWWords = fs.readFileSync(WORDS_FILE, 'utf8')
       .split('\n')
       .map(word => word.trim().toUpperCase())
       .filter(word => word.length >= 5 && word.length <= 10 && /^[A-Z]+$/.test(word));
     
-    logger.info({ total: allWords.length }, 'RTW words loaded');
-    return allWords;
+    logger.info({ total: cachedRTWWords.length }, 'RTW words loaded');
+    return cachedRTWWords;
   } catch (error) {
     logger.error({ error: error.message }, 'Error loading RTW words');
     return null;
@@ -639,6 +641,7 @@ const createRTWGame = (groupJid, ownerJid) => {
     maxRounds: 25,
     joinTimer: null,
     roundTimer: null,
+    gameTimer: null, // Max duration safety timer
     roundId: 0, // Unique ID for each round to prevent stale timers
     startTime: Date.now()
   };
@@ -655,6 +658,10 @@ const clearRTWTimers = (game) => {
   if (game.roundTimer) {
     clearInterval(game.roundTimer);
     game.roundTimer = null;
+  }
+  if (game.gameTimer) {
+    clearTimeout(game.gameTimer);
+    game.gameTimer = null;
   }
 };
 
@@ -699,6 +706,15 @@ const startRTWJoinPhase = async (sock, groupJid) => {
   const game = rtwGames.get(groupJid);
   if (!game) return;
 
+  // Safety timer — force end game after max duration
+  game.gameTimer = setTimeout(async () => {
+    const g = rtwGames.get(groupJid);
+    if (g && g.phase !== 'FINISHED') {
+      await endRTWGame(sock, groupJid, 'timeout');
+      await sock.sendMessage(groupJid, { text: '⏰ RTW game auto-ended (time limit reached).' });
+    }
+  }, RTW_MAX_DURATION);
+
   let timeLeft = 60;
 
   await sock.sendMessage(groupJid, {
@@ -706,14 +722,15 @@ const startRTWJoinPhase = async (sock, groupJid) => {
   });
 
   game.joinTimer = setInterval(async () => {
-    const currentGame = rtwGames.get(groupJid);
-    if (!currentGame || currentGame.phase !== 'JOINING') {
-      clearInterval(game.joinTimer);
-      game.joinTimer = null;
-      return;
-    }
+    try {
+      const currentGame = rtwGames.get(groupJid);
+      if (!currentGame || currentGame.phase !== 'JOINING') {
+        clearInterval(game.joinTimer);
+        game.joinTimer = null;
+        return;
+      }
 
-    timeLeft--;
+      timeLeft--;
 
     if (timeLeft === 30 || timeLeft === 10) {
       await sock.sendMessage(groupJid, {
@@ -745,6 +762,11 @@ const startRTWJoinPhase = async (sock, groupJid) => {
       });
 
       setTimeout(() => startRTWRound(sock, groupJid), 2000);
+    }
+    } catch (err) {
+      logger.error({ error: err.message }, 'RTW join phase error');
+      clearInterval(game.joinTimer);
+      game.joinTimer = null;
     }
   }, 1000);
 };
@@ -797,38 +819,44 @@ const startRTWRound = async (sock, groupJid) => {
 
   let timeLeft = 30;
   game.roundTimer = setInterval(async () => {
-    const currentGame = rtwGames.get(groupJid);
-    
-    // Check if game still exists and this is still the same round
-    if (!currentGame || currentGame.phase !== 'PLAYING' || currentGame.roundId !== currentRoundId) {
-      clearInterval(game.roundTimer);
-      game.roundTimer = null;
-      return;
-    }
-
-    timeLeft--;
-
-    if (timeLeft === 10) {
-      await sock.sendMessage(groupJid, { text: `⏰ *10s left!*` });
-    }
-
-    if (timeLeft <= 0) {
-      clearInterval(game.roundTimer);
-      game.roundTimer = null;
-
-      // Double check we're still on this round
-      const checkGame = rtwGames.get(groupJid);
-      if (!checkGame || checkGame.roundId !== currentRoundId) return;
-
-      await sock.sendMessage(groupJid, {
-        text: `⏰ *Time's up!*\n✅ Answer: *${checkGame.currentWord}*`
-      });
-
-      if (checkGame.round % 5 === 0) {
-        await showRTWLeaderboard(sock, groupJid);
+    try {
+      const currentGame = rtwGames.get(groupJid);
+      
+      // Check if game still exists and this is still the same round
+      if (!currentGame || currentGame.phase !== 'PLAYING' || currentGame.roundId !== currentRoundId) {
+        clearInterval(game.roundTimer);
+        game.roundTimer = null;
+        return;
       }
 
-      setTimeout(() => startRTWRound(sock, groupJid), 2500);
+      timeLeft--;
+
+      if (timeLeft === 10) {
+        await sock.sendMessage(groupJid, { text: `⏰ *10s left!*` });
+      }
+
+      if (timeLeft <= 0) {
+        clearInterval(game.roundTimer);
+        game.roundTimer = null;
+
+        // Double check we're still on this round
+        const checkGame = rtwGames.get(groupJid);
+        if (!checkGame || checkGame.roundId !== currentRoundId) return;
+
+        await sock.sendMessage(groupJid, {
+          text: `⏰ *Time's up!*\n✅ Answer: *${checkGame.currentWord}*`
+        });
+
+        if (checkGame.round % 5 === 0) {
+          await showRTWLeaderboard(sock, groupJid);
+        }
+
+        setTimeout(() => startRTWRound(sock, groupJid), 2500);
+      }
+    } catch (err) {
+      logger.error({ error: err.message }, 'RTW round timer error');
+      clearInterval(game.roundTimer);
+      game.roundTimer = null;
     }
   }, 1000);
 };
@@ -920,6 +948,9 @@ const validateWordAPI = async (word) => {
 };
 
 // Create WCG game
+const WCG_MAX_DURATION = 15 * 60 * 1000; // 15 min max game duration
+const RTW_MAX_DURATION = 20 * 60 * 1000; // 20 min max game duration
+
 const createWCGGame = (groupJid, starterJid) => {
   const game = {
     groupJid,
@@ -929,11 +960,13 @@ const createWCGGame = (groupJid, starterJid) => {
     currentPlayerIndex: 0,
     phase: 'JOINING', // JOINING, PLAYING, FINISHED
     round: 1,
+    roundId: 0, // Guard against stale timer callbacks
     usedWords: new Set(),
     currentLetter: null,
     requiredLength: 0,
     turnTimer: null,
     joinTimer: null,
+    gameTimer: null, // Max duration safety timer
     longestWord: { word: '', player: null, length: 0 },
     eliminatedPlayers: [],
     createdAt: Date.now()
@@ -1023,6 +1056,9 @@ const startWCGRound = async (sock, groupJid) => {
   const game = wcgGames.get(groupJid);
   if (!game || game.phase !== 'PLAYING') return;
 
+  game.roundId++;
+  const currentRoundId = game.roundId;
+
   // Check if we have a winner
   if (game.playerOrder.length === 1) {
     await endWCGGame(sock, groupJid, game.playerOrder[0]);
@@ -1032,9 +1068,6 @@ const startWCGRound = async (sock, groupJid) => {
   const currentPlayerJid = game.playerOrder[game.currentPlayerIndex];
   const nextPlayerIndex = (game.currentPlayerIndex + 1) % game.playerOrder.length;
   const nextPlayerJid = game.playerOrder[nextPlayerIndex];
-
-  const currentPlayer = game.players.find(p => p.jid === currentPlayerJid);
-  const nextPlayer = game.players.find(p => p.jid === nextPlayerJid);
 
   game.currentLetter = getRandomLetter();
   game.requiredLength = getRequiredLength(game.round);
@@ -1052,25 +1085,35 @@ const startWCGRound = async (sock, groupJid) => {
   // Start turn timer
   let timeLeft = timeLimit;
   game.turnTimer = setInterval(async () => {
-    const currentGame = wcgGames.get(groupJid);
-    if (!currentGame || currentGame.phase !== 'PLAYING') {
-      clearInterval(game.turnTimer);
-      return;
-    }
+    try {
+      const currentGame = wcgGames.get(groupJid);
+      // Guard: check game exists, is playing, and roundId matches (prevents stale callbacks)
+      if (!currentGame || currentGame.phase !== 'PLAYING' || currentGame.roundId !== currentRoundId) {
+        clearInterval(game.turnTimer);
+        game.turnTimer = null;
+        return;
+      }
 
-    timeLeft--;
+      timeLeft--;
 
-    if (timeLeft === 10) {
-      await sock.sendMessage(groupJid, {
-        text: `⏰ @${currentPlayerJid.split('@')[0]} *10s left!*`,
-        mentions: [currentPlayerJid]
-      });
-    }
+      if (timeLeft === 10) {
+        await sock.sendMessage(groupJid, {
+          text: `⏰ @${currentPlayerJid.split('@')[0]} *10s left!*`,
+          mentions: [currentPlayerJid]
+        });
+      }
 
-    if (timeLeft <= 0) {
+      if (timeLeft <= 0) {
+        clearInterval(game.turnTimer);
+        game.turnTimer = null;
+        const checkGame = wcgGames.get(groupJid);
+        if (!checkGame || checkGame.roundId !== currentRoundId) return;
+        await eliminateWCGPlayer(sock, groupJid, currentPlayerJid, 'time');
+      }
+    } catch (err) {
+      logger.error({ error: err.message }, 'WCG turn timer error');
       clearInterval(game.turnTimer);
       game.turnTimer = null;
-      await eliminateWCGPlayer(sock, groupJid, currentPlayerJid, 'time');
     }
   }, 1000);
 };
@@ -1083,6 +1126,7 @@ const eliminateWCGPlayer = async (sock, groupJid, playerJid, reason) => {
   const player = game.players.find(p => p.jid === playerJid);
   game.eliminatedPlayers.push(playerJid);
   game.playerOrder = game.playerOrder.filter(jid => jid !== playerJid);
+  game.roundId++; // Invalidate any stale callbacks
 
   const reasonText = reason === 'time' ? 'ran out of time!' : 'is out!';
 
@@ -1154,8 +1198,11 @@ const handleWCGWord = async (sock, groupJid, playerJid, word, messageKey) => {
   }
 
   // Word is correct!
-  clearInterval(game.turnTimer);
-  game.turnTimer = null;
+  if (game.turnTimer) {
+    clearInterval(game.turnTimer);
+    game.turnTimer = null;
+  }
+  game.roundId++; // Invalidate any stale timer callbacks
   game.usedWords.add(cleanWord);
 
   // Track longest word
@@ -1228,12 +1275,22 @@ const endWCGGame = async (sock, groupJid, winnerJid) => {
 
   const longestWordPlayer = game.longestWord.player;
 
+  const mentions = [winnerJid];
+  if (longestWordPlayer) mentions.push(longestWordPlayer);
+  if (allTimeWinner) mentions.push(allTimeWinner);
+
+  let resultText = `*WCG WINNER*\n\n@${winnerJid.split('@')[0]}\n\nLongest Word: *${game.longestWord?.word || 'N/A'}* (${game.longestWord?.word?.length || 0} letters)`;
+  if (allTimeWinner) {
+    resultText += `\n\nAll-Time Champ: @${allTimeWinner.split('@')[0]} (${maxWins} wins)`;
+  }
+
   await sock.sendMessage(groupJid, {
-    text: `*WCG WINNER*\n\n@${winnerJid.split('@')[0]}\n\nLongest Word: *${game.longestWord?.word || 'N/A'}* (${game.longestWord?.word?.length || 0} letters)\n\nAll-Time Champ: @${allTimeChamp.split('@')[0]} (${allTimeWins} wins)`,
-    mentions: [winnerJid, longestWordPlayer, allTimeWinner].filter(Boolean)
+    text: resultText,
+    mentions: [...new Set(mentions)]
   });
 
   saveData();
+  if (game.gameTimer) clearTimeout(game.gameTimer);
   wcgGames.delete(groupJid);
 };
 
@@ -1242,8 +1299,10 @@ const forceEndWCGGame = async (sock, groupJid) => {
   const game = wcgGames.get(groupJid);
   if (!game) return false;
 
-  if (game.turnTimer) clearInterval(game.turnTimer);
-  if (game.joinTimer) clearInterval(game.joinTimer);
+  game.phase = 'FINISHED';
+  if (game.turnTimer) { clearInterval(game.turnTimer); game.turnTimer = null; }
+  if (game.joinTimer) { clearInterval(game.joinTimer); game.joinTimer = null; }
+  if (game.gameTimer) { clearTimeout(game.gameTimer); game.gameTimer = null; }
 
   await sock.sendMessage(groupJid, {
     text: `*WCG game ended by admin*`
