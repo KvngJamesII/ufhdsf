@@ -11,8 +11,7 @@ const pino = require("pino");
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
-const { execFile } = require('child_process');
-const os = require('os');
+const youtubedl = require('youtube-dl-exec');
 
 const logger = pino({
   level: "info",
@@ -6191,69 +6190,38 @@ async function playSongCommand(sock, message, args, logger) {
       return;
     }
 
-    // Step 2: Download with yt-dlp
-    const tmpDir = os.tmpdir();
+    // Step 2: Download audio using youtube-dl-exec (bundles its own yt-dlp binary, no Python needed)
+    const tmpDir = require('os').tmpdir();
     const tempId = `play_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const webmFile = path.join(tmpDir, `${tempId}.webm`);
-    const mp3File = path.join(tmpDir, `${tempId}.mp3`);
 
-    // Download audio using yt-dlp
-    await new Promise((resolve, reject) => {
-      const args = [
-        '-x', '--audio-format', 'mp3', '--audio-quality', '5',
-        '--no-playlist', '--no-warnings',
-        '-o', path.join(tmpDir, `${tempId}.%(ext)s`),
-        video.url
-      ];
-      const proc = execFile('python3', ['-m', 'yt_dlp', ...args], { timeout: 120000 }, (error, stdout, stderr) => {
-        if (error) reject(error);
-        else resolve(stdout);
-      });
+    await youtubedl(video.url, {
+      format: 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
+      noPlaylist: true,
+      noWarnings: true,
+      output: path.join(tmpDir, `${tempId}.%(ext)s`),
     });
 
-    // Find the output file (could be .mp3 or .webm depending on ffmpeg availability)
-    let audioBuffer;
-    let mimetype = 'audio/mpeg';
-    if (fs.existsSync(mp3File)) {
-      audioBuffer = fs.readFileSync(mp3File);
-      fs.unlinkSync(mp3File);
-    } else if (fs.existsSync(webmFile)) {
-      // ffmpeg not available, try converting manually
-      try {
-        await new Promise((resolve, reject) => {
-          execFile('ffmpeg', ['-y', '-i', webmFile, '-vn', '-ab', '128k', '-ar', '44100', '-f', 'mp3', mp3File],
-            { timeout: 60000 }, (error) => {
-              if (error) reject(error);
-              else resolve();
-            });
-        });
-        audioBuffer = fs.readFileSync(mp3File);
-        fs.unlinkSync(webmFile);
-        fs.unlinkSync(mp3File);
-      } catch (e) {
-        // Send webm directly (WhatsApp supports it)
-        audioBuffer = fs.readFileSync(webmFile);
-        mimetype = 'audio/webm';
-        fs.unlinkSync(webmFile);
-      }
-    } else {
-      // Check for other extensions yt-dlp might use
-      const possibleExts = ['.opus', '.m4a', '.ogg'];
-      let found = false;
-      for (const ext of possibleExts) {
-        const f = path.join(tmpDir, `${tempId}${ext}`);
-        if (fs.existsSync(f)) {
-          audioBuffer = fs.readFileSync(f);
-          mimetype = 'audio/ogg';
-          fs.unlinkSync(f);
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        throw new Error('Downloaded file not found');
+    // Find the downloaded file
+    const possibleExts = ['.m4a', '.webm', '.mp3', '.opus', '.ogg'];
+    const mimeMap = { '.m4a': 'audio/mp4', '.webm': 'audio/webm', '.mp3': 'audio/mpeg', '.opus': 'audio/ogg', '.ogg': 'audio/ogg' };
+    let audioFile = null;
+    let mimetype = 'audio/mp4';
+
+    for (const ext of possibleExts) {
+      const f = path.join(tmpDir, `${tempId}${ext}`);
+      if (fs.existsSync(f)) {
+        audioFile = f;
+        mimetype = mimeMap[ext] || 'audio/mp4';
+        break;
       }
     }
+
+    if (!audioFile) {
+      throw new Error('Downloaded file not found');
+    }
+
+    const audioBuffer = fs.readFileSync(audioFile);
+    fs.unlinkSync(audioFile); // cleanup temp file
 
     // Check file size (WhatsApp limit ~16MB for audio)
     if (audioBuffer.length > 16 * 1024 * 1024) {
@@ -6270,7 +6238,6 @@ async function playSongCommand(sock, message, args, logger) {
       ptt: false
     });
 
-    // Send song info
     await sock.sendMessage(message.key.remoteJid, {
       text: `🎵 *${video.title}*\n👤 ${video.author.name}\n⏱️ ${video.timestamp}`,
     });
@@ -6284,7 +6251,7 @@ async function playSongCommand(sock, message, args, logger) {
   } catch (error) {
     logger.error({ error: error.message }, 'Play command error');
     await sock.sendMessage(message.key.remoteJid, {
-      text: "❌ Download failed. Make sure yt-dlp is installed on the server.",
+      text: "❌ Download failed. Please try again.",
     });
   }
 }
