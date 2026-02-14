@@ -5135,17 +5135,35 @@ Longest Word: "${stats.longestWord.word || 'N/A'}" (${stats.longestWord.length |
         }
 
         if (command === "left") {
-          try {
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "Goodbye!",
-            });
-            await sock.groupLeave(message.key.remoteJid);
-            logger.info({ group: message.key.remoteJid }, 'Bot left group');
-          } catch (err) {
-            logger.error({ error: err.message }, 'Leave group error');
-            await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Failed to leave.",
-            });
+          if (!isOwner) {
+            // Non-owner: remove themselves from the group
+            try {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: `👋 @${sender.split('@')[0]} has left the group.`,
+                mentions: [sender]
+              });
+              await sock.groupParticipantsUpdate(message.key.remoteJid, [sender], 'remove');
+              logger.info({ group: message.key.remoteJid, user: sender }, 'User left group via .left');
+            } catch (err) {
+              logger.error({ error: err.message }, 'Leave group error');
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Failed to leave. Bot may not be admin.",
+              });
+            }
+          } else {
+            // Owner: make the bot leave the group entirely
+            try {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "Goodbye!",
+              });
+              await sock.groupLeave(message.key.remoteJid);
+              logger.info({ group: message.key.remoteJid }, 'Bot left group');
+            } catch (err) {
+              logger.error({ error: err.message }, 'Leave group error');
+              await sock.sendMessage(message.key.remoteJid, {
+                text: "❌ Failed to leave.",
+              });
+            }
           }
           return;
         }
