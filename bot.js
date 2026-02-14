@@ -1657,7 +1657,6 @@ Ready to manage!`,
             // If image placeholder is used, fetch the profile picture and send as image
             const defaultAvatarPath = path.join(__dirname, 'images', 'default_avatar.png');
             let ppUrl = null;
-            let useLocalFallback = false;
             if (hasUserPP) {
               try {
                 ppUrl = await sock.profilePictureUrl(participantJid, 'image');
@@ -1665,7 +1664,7 @@ Ready to manage!`,
                 try {
                   ppUrl = await sock.profilePictureUrl(participantJid, 'display');
                 } catch (e2) {
-                  useLocalFallback = true;
+                  // no profile pic available
                 }
               }
             } else if (hasGrpPP) {
@@ -1675,19 +1674,20 @@ Ready to manage!`,
                 try {
                   ppUrl = await sock.profilePictureUrl(groupJid, 'display');
                 } catch (e2) {
-                  useLocalFallback = true;
+                  // no profile pic available
                 }
               }
             }
 
-            if ((ppUrl || useLocalFallback) && (hasGrpPP || hasUserPP)) {
-              // Send as image with caption
+            if (hasGrpPP || hasUserPP) {
+              // Send as image with caption — use profile pic or default avatar
               try {
                 let ppBuffer;
-                if (ppUrl && !useLocalFallback) {
+                if (ppUrl) {
                   const ppResponse = await axios.get(ppUrl, { responseType: 'arraybuffer', timeout: 10000 });
                   ppBuffer = Buffer.from(ppResponse.data);
                 } else {
+                  // No profile pic — use default anonymous avatar
                   ppBuffer = fs.readFileSync(defaultAvatarPath);
                 }
                 await sock.sendMessage(groupJid, {
@@ -2307,12 +2307,14 @@ We hope to see you again soon!`;
         // ============================================
         const antiPhotoAction = antiPhotoGroups[message.key.remoteJid];
         if (antiPhotoAction && !isAdmin && !canUseAsOwner && !message.key.fromMe) {
-          const hasImage = !!message.message.imageMessage;
-          const hasVideo = !!message.message.videoMessage;
-          // Allow view-once messages
+          // Check for view-once wrappers first — these should ALWAYS be allowed
           const isViewOnce = !!message.message.viewOnceMessage || !!message.message.viewOnceMessageV2 || !!message.message.viewOnceMessageV2Extension;
           
-          if ((hasImage || hasVideo) && !isViewOnce) {
+          // Only check for direct (non-viewonce) images/videos
+          const hasImage = !isViewOnce && !!message.message.imageMessage;
+          const hasVideo = !isViewOnce && !!message.message.videoMessage;
+          
+          if (hasImage || hasVideo) {
             const groupId = message.key.remoteJid;
             const userNumber = sender.split("@")[0];
             
@@ -4075,7 +4077,7 @@ if (command === "vv" && canUseBot) {
         }
 
         if (command === "setwelcome") {
-          if (!isGroupAdmin) {
+          if (!isAdmin && !canUseAsOwner) {
             await sock.sendMessage(message.key.remoteJid, {
               text: "❌ Admins only.",
             });
@@ -4108,7 +4110,7 @@ if (command === "vv" && canUseBot) {
         }
 
         if (command === "resetwelcome") {
-          if (!isGroupAdmin) {
+          if (!isAdmin && !canUseAsOwner) {
             await sock.sendMessage(message.key.remoteJid, {
               text: "❌ Admins only.",
             });
@@ -4135,7 +4137,7 @@ if (command === "vv" && canUseBot) {
         }
 
         if (command === "welcome") {
-          if (!isGroupAdmin) {
+          if (!isAdmin && !canUseAsOwner) {
             await sock.sendMessage(message.key.remoteJid, {
               text: "❌ Admins only.",
             });
@@ -4164,7 +4166,7 @@ if (command === "vv" && canUseBot) {
         }
 
         if (command === "goodbye") {
-          if (!isGroupAdmin) {
+          if (!isAdmin && !canUseAsOwner) {
             await sock.sendMessage(message.key.remoteJid, {
               text: "❌ Admins only.",
             });
@@ -5588,6 +5590,7 @@ ${changeEmoji} *24h Change:* ${changeSign}${change24h}%
           } else {
             stickerCommands[cmdName] = stickerHash || true;
           }
+          saveData(); // Persist to JSON
 
           await sock.sendMessage(message.key.remoteJid, {
             text: `✅ Sticker set to *${cmdName.toUpperCase()}*.`,
