@@ -30,7 +30,6 @@ const adminSettings = {};
 const stickerCommands = {};
 const lockedGroups = new Set();
 const userWarns = {};
-const blockedUsers = {};
 let BOT_OWNER = null; // Will be auto-detected from pairing
 const sudoUsers = []; // Users who can use the bot like owner
 
@@ -4150,47 +4149,61 @@ if (command === "vv" && canUseBot) {
         }
 
         if (command === "block") {
+          let targetJid;
           const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
-          if (!quoted) {
+          if (quoted) {
+            targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
+          } else if (args.length > 0) {
+            const num = args[0].replace(/[^0-9]/g, '');
+            if (num) targetJid = `${num}@s.whatsapp.net`;
+          }
+          if (!targetJid) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Reply to a message.",
+              text: "❌ Reply to a message or provide a number.\n\nExample: .block 2348012345678",
             });
             return;
           }
-
-          const targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
-          if (!targetJid) return;
-
-          if (!blockedUsers[myJid]) blockedUsers[myJid] = new Set();
-          blockedUsers[myJid].add(targetJid);
-
-          await sock.sendMessage(message.key.remoteJid, {
-            react: { text: "✅", key: message.key },
-          });
-          logger.info({ target: targetJid }, 'User blocked');
+          try {
+            await sock.updateBlockStatus(targetJid, 'block');
+            await sock.sendMessage(message.key.remoteJid, {
+              react: { text: "✅", key: message.key },
+            });
+            logger.info({ target: targetJid }, 'User blocked via WhatsApp API');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Block failed');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ Failed to block: ${err.message}`,
+            });
+          }
           return;
         }
 
         if (command === "unblock") {
-          if (args.length < 1) {
+          let targetJid;
+          const quoted = message.message.extendedTextMessage?.contextInfo?.quotedMessage;
+          if (quoted) {
+            targetJid = message.message.extendedTextMessage?.contextInfo?.participant;
+          } else if (args.length > 0) {
+            const num = args[0].replace(/[^0-9]/g, '');
+            if (num) targetJid = `${num}@s.whatsapp.net`;
+          }
+          if (!targetJid) {
             await sock.sendMessage(message.key.remoteJid, {
-              text: "❌ Usage: .unblock [number]\n\nExample: .unblock 1234567890",
+              text: "❌ Reply to a message or provide a number.\n\nExample: .unblock 2348012345678",
             });
             return;
           }
-
-          const phoneNumber = args[0];
-          const targetJid = phoneNumber + "@s.whatsapp.net";
-
-          if (blockedUsers[myJid]?.has(targetJid)) {
-            blockedUsers[myJid].delete(targetJid);
+          try {
+            await sock.updateBlockStatus(targetJid, 'unblock');
+            const displayNum = targetJid.split('@')[0];
             await sock.sendMessage(message.key.remoteJid, {
-              text: `✅ User ${phoneNumber} unblocked`,
+              text: `✅ User ${displayNum} unblocked`,
             });
-            logger.info({ target: targetJid }, 'User unblocked');
-          } else {
+            logger.info({ target: targetJid }, 'User unblocked via WhatsApp API');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Unblock failed');
             await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ User not found in blocked list`,
+              text: `❌ Failed to unblock: ${err.message}`,
             });
           }
           return;
@@ -6090,31 +6103,38 @@ _Use responsibly!_`,
         }
 
         if (command === "block" && isOwner) {
-          // If no number provided, block the person whose DM we're in
-          const number = args[0]?.replace(/[^0-9]/g, '') || message.key.remoteJid.split('@')[0];
-          const targetJid = `${number}@s.whatsapp.net`;
-          if (!blockedUsers[myJid]) blockedUsers[myJid] = new Set();
-          blockedUsers[myJid].add(targetJid);
-          await sock.sendMessage(message.key.remoteJid, {
-            text: `✅ User ${number} blocked.`,
-          });
-          logger.info({ target: targetJid }, 'User blocked from DM');
+          // Use actual JID from DM (supports @lid format), or number from args
+          const targetJid = args[0] ? `${args[0].replace(/[^0-9]/g, '')}@s.whatsapp.net` : message.key.remoteJid;
+          try {
+            await sock.updateBlockStatus(targetJid, 'block');
+            const displayNum = targetJid.split('@')[0];
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ User ${displayNum} blocked.`,
+            });
+            logger.info({ target: targetJid }, 'User blocked via WhatsApp API from DM');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Block from DM failed');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ Failed to block: ${err.message}`,
+            });
+          }
           return;
         }
 
         if (command === "unblock" && isOwner) {
-          // If no number provided, unblock the person whose DM we're in
-          const number = args[0]?.replace(/[^0-9]/g, '') || message.key.remoteJid.split('@')[0];
-          const targetJid = `${number}@s.whatsapp.net`;
-          if (blockedUsers[myJid]?.has(targetJid)) {
-            blockedUsers[myJid].delete(targetJid);
+          // Use actual JID from DM (supports @lid format), or number from args
+          const targetJid = args[0] ? `${args[0].replace(/[^0-9]/g, '')}@s.whatsapp.net` : message.key.remoteJid;
+          try {
+            await sock.updateBlockStatus(targetJid, 'unblock');
+            const displayNum = targetJid.split('@')[0];
             await sock.sendMessage(message.key.remoteJid, {
-              text: `✅ User ${number} unblocked.`,
+              text: `✅ User ${displayNum} unblocked.`,
             });
-            logger.info({ target: targetJid }, 'User unblocked from DM');
-          } else {
+            logger.info({ target: targetJid }, 'User unblocked via WhatsApp API from DM');
+          } catch (err) {
+            logger.error({ error: err.message }, 'Unblock from DM failed');
             await sock.sendMessage(message.key.remoteJid, {
-              text: `❌ User not found in blocked list.`,
+              text: `❌ Failed to unblock: ${err.message}`,
             });
           }
           return;
