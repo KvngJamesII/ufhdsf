@@ -11,6 +11,8 @@ const pino = require("pino");
 const fs = require("fs");
 const path = require("path");
 const sharp = require("sharp");
+const { execFile } = require('child_process');
+const os = require('os');
 
 const logger = pino({
   level: "info",
@@ -41,6 +43,7 @@ const botStartTime = Date.now();
 const ANONYMOUS_WEB_URL = "https://lucaanonym.vercel.app"; // Deployed Vercel URL
 const anonymousSessions = new Map();
 const axios = require('axios');
+const yts = require('yt-search');
 
 // RTW Game System
 const rtwGames = new Map(); // Store active games by group JID
@@ -6139,40 +6142,121 @@ async function playSongCommand(sock, message, args, logger) {
   });
 
   try {
-    const apiUrl = 'https://apis.davidcyriltech.my.id/song?query=' + encodeURIComponent(query) + '&apikey=';
-    const response = await axios.get(apiUrl);
-    const data = response.data;
+    // Step 1: Search YouTube
+    const searchResults = await yts(query);
+    const videos = searchResults.videos;
 
-    if (!data.status || !data.result) {
+    if (!videos || videos.length === 0) {
       await sock.sendMessage(message.key.remoteJid, {
-        text: "❌ Song not found.",
+        text: "❌ No results found.",
       });
       return;
     }
 
-    const song = data.result;
-    const audioUrl = song.audio.download_url;
+    const video = videos[0];
 
-    // Download and send audio
-    const audioResponse = await axios.get(audioUrl, { responseType: 'arraybuffer' });
-    const audioBuffer = Buffer.from(audioResponse.data);
+    // Limit to 10 minutes
+    if (video.seconds > 600) {
+      await sock.sendMessage(message.key.remoteJid, {
+        text: "❌ Song is too long (max 10 minutes).",
+      });
+      return;
+    }
 
+    // Step 2: Download with yt-dlp
+    const tmpDir = os.tmpdir();
+    const tempId = `play_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const webmFile = path.join(tmpDir, `${tempId}.webm`);
+    const mp3File = path.join(tmpDir, `${tempId}.mp3`);
+
+    // Download audio using yt-dlp
+    await new Promise((resolve, reject) => {
+      const args = [
+        '-x', '--audio-format', 'mp3', '--audio-quality', '5',
+        '--no-playlist', '--no-warnings',
+        '-o', path.join(tmpDir, `${tempId}.%(ext)s`),
+        video.url
+      ];
+      const proc = execFile('yt-dlp', args, { timeout: 120000 }, (error, stdout, stderr) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      });
+    });
+
+    // Find the output file (could be .mp3 or .webm depending on ffmpeg availability)
+    let audioBuffer;
+    let mimetype = 'audio/mpeg';
+    if (fs.existsSync(mp3File)) {
+      audioBuffer = fs.readFileSync(mp3File);
+      fs.unlinkSync(mp3File);
+    } else if (fs.existsSync(webmFile)) {
+      // ffmpeg not available, try converting manually
+      try {
+        await new Promise((resolve, reject) => {
+          execFile('ffmpeg', ['-y', '-i', webmFile, '-vn', '-ab', '128k', '-ar', '44100', '-f', 'mp3', mp3File],
+            { timeout: 60000 }, (error) => {
+              if (error) reject(error);
+              else resolve();
+            });
+        });
+        audioBuffer = fs.readFileSync(mp3File);
+        fs.unlinkSync(webmFile);
+        fs.unlinkSync(mp3File);
+      } catch (e) {
+        // Send webm directly (WhatsApp supports it)
+        audioBuffer = fs.readFileSync(webmFile);
+        mimetype = 'audio/webm';
+        fs.unlinkSync(webmFile);
+      }
+    } else {
+      // Check for other extensions yt-dlp might use
+      const possibleExts = ['.opus', '.m4a', '.ogg'];
+      let found = false;
+      for (const ext of possibleExts) {
+        const f = path.join(tmpDir, `${tempId}${ext}`);
+        if (fs.existsSync(f)) {
+          audioBuffer = fs.readFileSync(f);
+          mimetype = 'audio/ogg';
+          fs.unlinkSync(f);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        throw new Error('Downloaded file not found');
+      }
+    }
+
+    // Check file size (WhatsApp limit ~16MB for audio)
+    if (audioBuffer.length > 16 * 1024 * 1024) {
+      await sock.sendMessage(message.key.remoteJid, {
+        text: "❌ File too large to send.",
+      });
+      return;
+    }
+
+    // Step 3: Send audio with song info
     await sock.sendMessage(message.key.remoteJid, {
       audio: audioBuffer,
-      mimetype: 'audio/mpeg',
+      mimetype,
       ptt: false
+    });
+
+    // Send song info
+    await sock.sendMessage(message.key.remoteJid, {
+      text: `🎵 *${video.title}*\n👤 ${video.author.name}\n⏱️ ${video.timestamp}`,
     });
 
     await sock.sendMessage(message.key.remoteJid, {
       react: { text: "✅", key: message.key },
     });
 
-    logger.info({ song: song.title, query: query }, 'Song played successfully');
+    logger.info({ song: video.title, query }, 'Song played successfully');
 
   } catch (error) {
     logger.error({ error: error.message }, 'Play command error');
     await sock.sendMessage(message.key.remoteJid, {
-      text: "❌ Download failed.",
+      text: "❌ Download failed. Make sure yt-dlp is installed on the server.",
     });
   }
 }
