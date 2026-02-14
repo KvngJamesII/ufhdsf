@@ -57,6 +57,9 @@ const QUESTIONS_FILE = path.join(__dirname, 'questions_400.txt');
 // Custom welcome messages per group
 const customWelcomeMessages = {};
 
+// Custom goodbye messages per group
+const customGoodbyeMessages = {};
+
 // Welcome/Goodbye enabled per group (disabled by default)
 const welcomeEnabled = {}; // { groupJid: true/false }
 const goodbyeEnabled = {}; // { groupJid: true/false }
@@ -100,6 +103,9 @@ const loadData = () => {
       // Load custom welcome messages
       if (data.customWelcomeMessages) {
         Object.assign(customWelcomeMessages, data.customWelcomeMessages);
+      }
+      if (data.customGoodbyeMessages) {
+        Object.assign(customGoodbyeMessages, data.customGoodbyeMessages);
       }
 
       // Load welcome/goodbye enabled settings
@@ -181,6 +187,7 @@ const saveData = () => {
     const data = {
       botOwner: BOT_OWNER,
       customWelcomeMessages,
+      customGoodbyeMessages,
       welcomeEnabled,
       goodbyeEnabled,
       stickerCommands,
@@ -1461,11 +1468,14 @@ const getMenu = () => `
  ◯ *.antistatus* kick/warn/off
  ◯ *.antitag* kick/warn/off
  ◯ *.tagall* - Tag all (.t/.tag)
- ◯ *.hidetag* - Invisible tag
+ ◯ *.hidetag* [msg] - Tag all
+ ◯ *.add* [number]
  ◯ *.welcome* on/off
  ◯ *.goodbye* on/off
  ◯ *.setwelcome* [msg]
  ◯ *.resetwelcome*
+ ◯ *.setgoodbye* [msg]
+ ◯ *.resetgoodbye*
 
  ━━━ *GAMES* ━━━
  ⨷ *.anonymous* - Anon chat
@@ -1817,16 +1827,97 @@ Please read the group rules and enjoy your stay!`;
         const participantJid = typeof participant === 'string' ? participant : participant?.id || participant?.jid || String(participant);
         if (!participantJid || typeof participantJid !== 'string') continue;
         
-        const goodbyeMessage = `👋 *Goodbye!*
-        
-@${participantJid.split('@')[0]} has left the group.
-        
-We hope to see you again soon!`;
+        const username = participantJid.split('@')[0];
+        let goodbyeMessage;
 
-        await sock.sendMessage(groupJid, {
-          text: goodbyeMessage,
-          mentions: [participantJid]
-        });
+        if (customGoodbyeMessages[groupJid]) {
+          // Use custom goodbye message with placeholder replacements
+          try {
+            const groupMeta = await sock.groupMetadata(groupJid);
+            const groupName = groupMeta.subject || 'Group';
+            const groupDesc = groupMeta.desc || 'No description';
+            const memberCount = groupMeta.participants?.length || 0;
+
+            const hasGrpPP = customGoodbyeMessages[groupJid].includes('{grppp}');
+            const hasUserPP = customGoodbyeMessages[groupJid].includes('{userpp}');
+
+            goodbyeMessage = customGoodbyeMessages[groupJid]
+              .replace(/{user}/g, `@${username}`)
+              .replace(/{username}/g, username)
+              .replace(/{groupname}/g, groupName)
+              .replace(/{desc}/g, groupDesc)
+              .replace(/{membercount}/g, memberCount.toString())
+              .replace(/{grppp}/g, '')
+              .replace(/{userpp}/g, '')
+              .trim();
+
+            const defaultAvatarPath = path.join(__dirname, 'images', 'default_avatar.png');
+            let ppUrl = null;
+            if (hasUserPP) {
+              try {
+                ppUrl = await sock.profilePictureUrl(participantJid, 'image');
+              } catch (e) {
+                try { ppUrl = await sock.profilePictureUrl(participantJid, 'display'); } catch (e2) {}
+              }
+            } else if (hasGrpPP) {
+              try {
+                ppUrl = await sock.profilePictureUrl(groupJid, 'image');
+              } catch (e) {
+                try { ppUrl = await sock.profilePictureUrl(groupJid, 'display'); } catch (e2) {}
+              }
+            }
+
+            if (hasGrpPP || hasUserPP) {
+              try {
+                let ppBuffer;
+                if (ppUrl) {
+                  const ppResponse = await axios.get(ppUrl, { responseType: 'arraybuffer', timeout: 10000 });
+                  ppBuffer = Buffer.from(ppResponse.data);
+                } else {
+                  ppBuffer = fs.readFileSync(defaultAvatarPath);
+                }
+                await sock.sendMessage(groupJid, {
+                  image: ppBuffer,
+                  caption: goodbyeMessage,
+                  mentions: [participantJid]
+                });
+              } catch (ppErr) {
+                logger.error({ error: ppErr.message }, 'Failed to fetch goodbye profile pic');
+                try {
+                  const defBuffer = fs.readFileSync(defaultAvatarPath);
+                  await sock.sendMessage(groupJid, {
+                    image: defBuffer,
+                    caption: goodbyeMessage,
+                    mentions: [participantJid]
+                  });
+                } catch (defErr) {
+                  await sock.sendMessage(groupJid, { text: goodbyeMessage, mentions: [participantJid] });
+                }
+              }
+            } else {
+              await sock.sendMessage(groupJid, { text: goodbyeMessage, mentions: [participantJid] });
+            }
+          } catch (error) {
+            goodbyeMessage = customGoodbyeMessages[groupJid].replace(/{user}/g, `@${username}`).replace(/{grppp}/g, '').replace(/{userpp}/g, '').trim();
+            logger.error({ error: error.message }, 'Error in custom goodbye message');
+            await sock.sendMessage(groupJid, { text: goodbyeMessage, mentions: [participantJid] });
+          }
+        } else {
+          // Default goodbye message
+          goodbyeMessage = `👋 *Goodbye!*
+
+@${username} has left the group.
+
+We hope to see you again soon!`;
+        }
+
+        // Only send here if there was NO custom goodbye (custom is handled above with image support)
+        if (!customGoodbyeMessages[groupJid]) {
+          await sock.sendMessage(groupJid, {
+            text: goodbyeMessage,
+            mentions: [participantJid]
+          });
+        }
       }
     }
   });
@@ -2765,18 +2856,20 @@ Source: CoinGecko`,
 
         if (command === "hidetag" && canUseBot) {
           try {
+            const tagMsg = args.join(' ').trim() || '.';
             let mentions = [];
             for (let member of groupMetadata.participants) {
               mentions.push(member.id);
             }
 
-            await sock.sendMessage(message.key.remoteJid, {
-              text: ".",
-              mentions,
-            });
+            // Delete the original .hidetag command message
+            try {
+              await sock.sendMessage(message.key.remoteJid, { delete: message.key });
+            } catch (e) {}
 
             await sock.sendMessage(message.key.remoteJid, {
-              react: { text: "✅", key: message.key },
+              text: tagMsg,
+              mentions,
             });
           } catch (err) {
             logger.error({ error: err.message }, 'Hidetag error');
@@ -3467,22 +3560,15 @@ if (command === "vv" && canUseBot) {
                     mentions.push(member.id);
                   }
 
+                  // Delete the sticker message that triggered hidetag
+                  try {
+                    await sock.sendMessage(message.key.remoteJid, { delete: message.key });
+                  } catch (e) {}
+
                   await sock.sendMessage(message.key.remoteJid, {
-                    text: ".",
+                    text: '.',
                     mentions,
                   });
-
-                  await sock.sendMessage(message.key.remoteJid, {
-                    react: { text: "✅", key: message.key },
-                  });
-
-                  setTimeout(async () => {
-                    try {
-                      await sock.sendMessage(message.key.remoteJid, {
-                        react: { text: "", key: message.key },
-                      });
-                    } catch (err) {}
-                  }, 5000);
                 } catch (err) {
                   logger.error({ error: err.message }, 'Sticker hidetag error');
                 }
@@ -4262,7 +4348,7 @@ if (command === "vv" && canUseBot) {
           if (!action || (action !== "on" && action !== "off")) {
             const currentStatus = goodbyeEnabled[message.key.remoteJid] ? "ON ✅" : "OFF ❌";
             await sock.sendMessage(message.key.remoteJid, {
-              text: `📝 *Goodbye Messages*\n\nCurrent status: *${currentStatus}*\n\n*Usage:*\n• .goodbye on - Enable goodbye messages\n• .goodbye off - Disable goodbye messages`,
+              text: `📝 *Goodbye Messages*\n\nCurrent status: *${currentStatus}*\n\n*Usage:*\n• .goodbye on - Enable goodbye messages\n• .goodbye off - Disable goodbye messages\n• .setgoodbye [msg] - Set custom message\n• .resetgoodbye - Reset to default message\n\n*Placeholders:*\n• {user} - @mention\n• {username} - name\n• {groupname} - group name\n• {grppp} / {userpp} - profile pic`,
             });
             return;
           }
@@ -4275,6 +4361,115 @@ if (command === "vv" && canUseBot) {
             text: isOn ? "✅ Goodbye messages enabled for this group." : "❌ Goodbye messages disabled for this group.",
           });
           logger.info({ group: message.key.remoteJid, enabled: isOn }, 'Goodbye toggled');
+          return;
+        }
+
+        if (command === "setgoodbye") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const goodbyeText = text.split(' ').slice(1).join(' ').trim();
+
+          if (!goodbyeText) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `❌ *Usage:* .setgoodbye [message]\n\n📝 *Available Placeholders:*\n• {user} - Mention leaving member\n• {username} - Member's name\n• {groupname} - Group name\n• {desc} - Group description\n• {membercount} - Total members\n• {grppp} - Send with group profile pic\n• {userpp} - Send with member's profile pic\n\n*Example:*\n.setgoodbye {userpp} Goodbye {user}! {groupname} now has {membercount} members. 😢\n\n_Note: Use {grppp} or {userpp} anywhere in the message to attach that profile picture to the goodbye message._`,
+            });
+            return;
+          }
+
+          customGoodbyeMessages[message.key.remoteJid] = goodbyeText;
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `✅ Goodbye message set!\n\n_Preview placeholders:_\n• {user} → @mention\n• {username} → username\n• {groupname} → group name\n• {desc} → group description\n• {membercount} → member count\n• {grppp} → group profile picture\n• {userpp} → member's profile picture`,
+          });
+
+          logger.info({
+            group: message.key.remoteJid,
+            goodbyeMessage: goodbyeText
+          }, 'Custom goodbye message set');
+          return;
+        }
+
+        if (command === "resetgoodbye") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          if (!customGoodbyeMessages[message.key.remoteJid]) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "ℹ️ Already using default goodbye message.",
+            });
+            return;
+          }
+
+          delete customGoodbyeMessages[message.key.remoteJid];
+          saveData();
+
+          await sock.sendMessage(message.key.remoteJid, {
+            text: `Goodbye message reset to default.`,
+          });
+
+          logger.info({ group: message.key.remoteJid }, 'Goodbye message reset to default');
+          return;
+        }
+
+        if (command === "add") {
+          if (!isAdmin && !canUseAsOwner) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ Admins only.",
+            });
+            return;
+          }
+
+          const number = args[0]?.replace(/[^0-9]/g, '');
+          if (!number) {
+            await sock.sendMessage(message.key.remoteJid, {
+              text: "❌ *Usage:* .add [number]\n\n*Example:* .add 2347073260074",
+            });
+            return;
+          }
+
+          const userJid = `${number}@s.whatsapp.net`;
+          try {
+            await sock.groupParticipantsUpdate(message.key.remoteJid, [userJid], 'add');
+            await sock.sendMessage(message.key.remoteJid, {
+              text: `✅ @${number} has been added to the group.`,
+              mentions: [userJid]
+            });
+          } catch (err) {
+            if (err.message?.includes('403') || err.message?.includes('not-authorized')) {
+              // Send invite link instead
+              try {
+                const inviteCode = await sock.groupInviteCode(message.key.remoteJid);
+                await sock.sendMessage(userJid, {
+                  text: `You've been invited to join a group!\nhttps://chat.whatsapp.com/${inviteCode}`
+                });
+                await sock.sendMessage(message.key.remoteJid, {
+                  text: `⚠️ Couldn't add @${number} directly (privacy settings). An invite link has been sent to their DM.`,
+                  mentions: [userJid]
+                });
+              } catch (invErr) {
+                await sock.sendMessage(message.key.remoteJid, {
+                  text: `❌ Failed to add @${number}. They may have privacy settings preventing it.`,
+                  mentions: [userJid]
+                });
+              }
+            } else {
+              await sock.sendMessage(message.key.remoteJid, {
+                text: `❌ Failed to add @${number}: ${err.message || 'Unknown error'}`,
+                mentions: [userJid]
+              });
+            }
+            logger.error({ error: err.message, number }, 'Add user error');
+          }
           return;
         }
 
