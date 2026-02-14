@@ -2725,6 +2725,30 @@ Source: CoinGecko`,
           return;
         }
 
+        if (command === "taggg" && canUseBot) {
+          try {
+            const tagMsg = args.join(' ').trim() || 'Hello everyone!';
+            let mentions = [];
+            for (let member of groupMetadata.participants) {
+              mentions.push(member.id);
+            }
+
+            // Delete the original .taggg command message
+            try {
+              await sock.sendMessage(message.key.remoteJid, { delete: message.key });
+            } catch (e) {}
+
+            // Send the text with silent mentions
+            await sock.sendMessage(message.key.remoteJid, {
+              text: tagMsg,
+              mentions,
+            });
+          } catch (err) {
+            logger.error({ error: err.message }, 'Taggg error');
+          }
+          return;
+        }
+
         // This check is now redundant as we handle it earlier
         // Removed duplicate check
 
