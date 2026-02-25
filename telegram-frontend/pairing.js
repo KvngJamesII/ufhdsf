@@ -47,12 +47,13 @@ class PairingHandler {
         console.log(`[PAIRING] Loading auth state from: ${authDir}`);
         const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-        // Create socket with extended timeouts
+        // Create socket with extended timeouts and custom version
         console.log(`[PAIRING] Creating WhatsApp socket...`);
         const sock = makeWASocket({
           auth: state,
           logger: pino({ level: 'silent' }),
           printQRInTerminal: false,
+          version: [2, 3000, 1033893291],
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
           keepAliveIntervalMs: 10000,
