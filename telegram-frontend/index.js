@@ -98,6 +98,33 @@ function sendMainMenu(chatId, message = 'Choose an option:') {
   bot.sendMessage(chatId, message, keyboard);
 }
 
+// Command: /del
+bot.onText(/\/del(?:\s+(.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+
+  if (!db.isAdmin(chatId)) {
+    bot.sendMessage(chatId, '❌ Admin access required.');
+    return;
+  }
+
+  const phone = match[1] ? match[1].trim().replace(/[^0-9]/g, '') : null;
+
+  if (!phone) {
+    bot.sendMessage(chatId, '❌ Please provide a phone number.\n\nUsage: `/del 234707326074`', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  bot.sendMessage(chatId, `🔄 Deleting bot and folder for +${phone}...`);
+
+  const result = await ProcessManager.deleteUserBotAndFolder(phone);
+
+  if (result.success) {
+    bot.sendMessage(chatId, `✅ *Success!*\n\nBot for +${phone} has been stopped, its PM2 process deleted, and its user folder removed.`, { parse_mode: 'Markdown' });
+  } else {
+    bot.sendMessage(chatId, `❌ *Error:* ${result.error}`, { parse_mode: 'Markdown' });
+  }
+});
+
 // Command: /start
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
@@ -160,6 +187,9 @@ Send message to all users
 
 🔄 *Restart All Bots*
 Restart all connected WhatsApp bots
+
+🗑️ */del <phone>*
+Stop bot, delete PM2 process, and remove user folder
 
 *User Management:*
 - View user connection status
@@ -669,6 +699,13 @@ process.on('SIGINT', async () => {
   // Users can manage them via Telegram or PM2 commands
   process.exit(0);
 });
+
+// Auto-cleanup interval (every 5 minutes)
+setInterval(() => {
+  ProcessManager.monitorAndCleanupBots((targetId, message) => {
+    bot.sendMessage(targetId, message, { parse_mode: 'Markdown' });
+  });
+}, 5 * 60 * 1000);
 
 // Start
 console.clear();

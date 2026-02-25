@@ -6,6 +6,7 @@ const fs = require('fs');
 const execAsync = util.promisify(exec);
 
 const USERS_DIR = path.join(__dirname, '..', 'users');
+const db = require('./database');
 const BOT_SCRIPT = path.join(__dirname, '..', 'bot.js');
 
 class ProcessManager {
@@ -239,6 +240,69 @@ class ProcessManager {
     }
 
     return { success: true, stopped };
+  }
+
+  // Delete bot process and user folder
+  static async deleteUserBotAndFolder(phone) {
+    try {
+      console.log(`[PROCESS] Permanently deleting bot and folder for ${phone}...`);
+      
+      // 1. Stop and delete PM2 process
+      await this.stopBot(phone);
+
+      // 2. Delete user folder
+      const userDir = path.join(USERS_DIR, `user_${phone}`);
+      if (fs.existsSync(userDir)) {
+        fs.rmSync(userDir, { recursive: true, force: true });
+        console.log(`[PROCESS] Deleted folder: ${userDir}`);
+      }
+
+      // 3. Update database
+      db.deleteUserByPhone(phone);
+
+      return { success: true };
+    } catch (error) {
+      console.error(`[PROCESS] Error deleting bot and folder for ${phone}:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Monitor bots and cleanup if limits exceeded
+  static async monitorAndCleanupBots(notifyCallback) {
+    try {
+      const bots = await this.getAllRunningBots();
+      const MEMORY_LIMIT = 1024 * 1024 * 1024; // 1GB in bytes
+      const RESTART_LIMIT = 50;
+
+      for (const bot of bots) {
+        let reason = null;
+        if (bot.memory > MEMORY_LIMIT) {
+          reason = `Memory limit exceeded (${(bot.memory / (1024 * 1024)).toFixed(2)} MB > 1GB)`;
+        } else if (bot.restarts > RESTART_LIMIT) {
+          reason = `Restart limit exceeded (${bot.restarts} > ${RESTART_LIMIT})`;
+        }
+
+        if (reason) {
+          console.log(`[PROCESS] Auto-cleaning bot ${bot.phone}: ${reason}`);
+          const user = db.findUserByPhone(bot.phone);
+          const telegramId = user ? user.telegramId : null;
+
+          await this.deleteUserBotAndFolder(bot.phone);
+
+          if (notifyCallback && telegramId) {
+            notifyCallback(telegramId, `⚠️ *Your bot has been stopped and deleted.*\n\n*Reason:* ${reason}\n\nPlease contact admin if you think this is an error.`);
+          }
+          
+          // Also notify admin
+          const adminId = db.getAdminId();
+          if (notifyCallback && adminId) {
+            notifyCallback(adminId, `🛡️ *Auto-Cleanup Executed*\n\n*User:* ${bot.phone}\n*Reason:* ${reason}\n*Action:* Process stopped and folder deleted.`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[PROCESS] Error in monitorAndCleanupBots:', error);
+    }
   }
 }
 
