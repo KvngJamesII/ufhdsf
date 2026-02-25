@@ -52,6 +52,7 @@ class PairingHandler {
         const sock = makeWASocket({
           auth: state,
           logger: pino({ level: 'silent' }),
+          browser: ['Ubuntu', 'Chrome', '20.0.04'],
           printQRInTerminal: false,
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
