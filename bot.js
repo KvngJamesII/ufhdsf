@@ -1575,6 +1575,7 @@ async function startBot() {
     auth: state,
     logger: socketLogger,
     printQRInTerminal: false,
+    version: [2, 3000, 1033893291],
   });
 
   sock.ev.on("connection.update", async (update) => {
