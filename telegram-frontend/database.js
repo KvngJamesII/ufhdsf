@@ -115,6 +115,22 @@ class Database {
     return { success: false, error: 'User not found' };
   }
 
+  // Delete user by phone
+  deleteUserByPhone(phone) {
+    const user = this.findUserByPhone(phone);
+    if (user) {
+      delete this.users[user.telegramId];
+      this.save();
+      return { success: true, telegramId: user.telegramId };
+    }
+    return { success: false, error: 'User not found with this phone' };
+  }
+
+  // Find user by phone
+  findUserByPhone(phone) {
+    return Object.values(this.users).find(u => u.phone === phone) || null;
+  }
+
   // Get all users
   getAllUsers() {
     return Object.values(this.users);
